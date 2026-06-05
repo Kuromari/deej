@@ -29,6 +29,10 @@ type wcaSessionFinder struct {
 	masterIn  *masterSession
 }
 
+func (sf *wcaSessionFinder) ChangedSinkInputChannel() <-chan uint32 {
+	return nil
+}
+
 const (
 
 	// there's no real mystery here, it's just a random GUID
@@ -538,4 +542,10 @@ func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
 }
 func (sf *wcaSessionFinder) noopCallback() (hResult uintptr) {
 	return
+}
+
+// NewSinkInputChannel is a Linux/PulseAudio concept. On Windows we return nil
+// and the session map falls back to polling.
+func (sf *wcaSessionFinder) NewSinkInputChannel() <-chan uint32 {
+	return nil
 }

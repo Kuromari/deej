@@ -9,14 +9,12 @@
 slider_mapping:
   0: master
   1: floorp
-  2: nte
+  2: 
+    - nte
+    - java
   3:
-    - NTE
-    - GameThread
     - Heroic
-    - pathofexile_x64.exe
-    - rocketleague.exe
-  4: discord.exe
+  4: Astro A50 Chat
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false

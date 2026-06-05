@@ -23,6 +23,11 @@ type sessionMap struct {
 
 	lastSessionRefresh time.Time
 	unmappedSessions   []Session
+
+	// lastVolumeApply tracks when we last called applyCurrentSliderValues.
+	// pactl subscribe events that arrive within a short window after a volume
+	// apply are ignored — they were likely triggered by our own SetVolume calls.
+	lastVolumeApply time.Time
 }
 
 const (
@@ -81,7 +86,9 @@ func (m *sessionMap) initialize() error {
 
 	m.setupOnConfigReload()
 	m.setupOnSliderMove()
+	m.setupOnNewSinkInput()
 	m.setupPeriodicRefresh()
+	m.setupOnChangedSinkInput()
 
 	return nil
 }
@@ -150,30 +157,90 @@ func (m *sessionMap) setupOnSliderMove() {
 	}()
 }
 
-// setupPeriodicRefresh runs a background goroutine that periodically checks for new
-// audio sessions on Linux. When a new app starts playing audio (e.g. a game, browser,
-// or media player), its volume is set immediately to whatever the matching slider
-// currently shows — no need to wiggle the slider first.
+// setupOnNewSinkInput listens to the PulseAudio event channel provided by the
+// session finder. When a new sink input (audio stream) appears, we immediately
+// fetch its info, create a session object for it, and apply the current slider
+// value — all before the next polling cycle would even fire.
 //
-// The ticker respects the same minTimeBetweenSessionRefreshes cooldown used elsewhere,
-// so it will simply be a no-op during periods of normal slider activity.
+// This is the fast path: event-driven instead of timed polling.
+
+func (m *sessionMap) setupOnChangedSinkInput() {
+	ch := m.sessionFinder.ChangedSinkInputChannel()
+	if ch == nil {
+		// not supported on this platform
+		return
+	}
+
+	const eventCooldown = 5 * time.Millisecond
+
+	go func() {
+		for range ch {
+
+			if time.Since(m.lastVolumeApply) < eventCooldown {
+				m.logger.Debugw("Ignoring PA event during cooldown after volume apply",
+					"sinkInputIndex", -1)
+				continue
+			}
+
+			m.logger.Debugw("PA sink input changed, re-applying slider values")
+			m.refreshSessions(true)
+			m.applyCurrentSliderValues()
+		}
+	}()
+}
+
+func (m *sessionMap) setupOnNewSinkInput() {
+	ch := m.sessionFinder.NewSinkInputChannel()
+	if ch == nil {
+		// not supported on this platform
+		return
+	}
+
+	const eventCooldown = 5 * time.Millisecond
+
+	go func() {
+		for sinkInputIndex := range ch {
+			// Ignore events that arrived within the cooldown window after our own
+			// SetVolume calls — pactl subscribe also reports those as 'change' events.
+			if time.Since(m.lastVolumeApply) < eventCooldown {
+				m.logger.Debugw("Ignoring PA event during cooldown after volume apply",
+					"sinkInputIndex", sinkInputIndex)
+				continue
+			}
+
+			m.logger.Debugw("New PA sink input event, scheduling volume enforcement",
+				"sinkInputIndex", sinkInputIndex)
+
+			// Full refresh once so the new session is in the map.
+			m.refreshSessions(true)
+
+			// Then hammer only the volume-apply (cheap) for 1 second to beat
+			// module-stream-restore, which may restore its own value shortly after.
+			go func() {
+				for i := 0; i < 10; i++ {
+					time.Sleep(100 * time.Millisecond)
+					m.applyCurrentSliderValues()
+				}
+			}()
+		}
+	}()
+}
+
+// setupPeriodicRefresh runs a background goroutine that periodically does a full
+// session refresh on Linux to clean up stale sessions (apps that closed).
+// New sessions are handled immediately via PulseAudio events in setupOnNewSinkInput,
+// so no fast-polling is needed here.
 func (m *sessionMap) setupPeriodicRefresh() {
-	// only active on Linux, where PulseAudio sessions appear dynamically
 	if !util.Linux() {
 		return
 	}
 
-	const periodicRefreshInterval = 25 * time.Millisecond
-
 	go func() {
-		ticker := time.NewTicker(periodicRefreshInterval)
+		ticker := time.NewTicker(time.Second * 5)
 		defer ticker.Stop()
 
 		for {
 			<-ticker.C
-
-			// refreshSessions already respects minTimeBetweenSessionRefreshes,
-			// so this call is effectively rate-limited and safe to fire frequently.
 			m.refreshSessions(false)
 		}
 	}()
@@ -207,6 +274,8 @@ func (m *sessionMap) refreshSessions(force bool) {
 // This is called after a session refresh so that new audio sessions (e.g. a freshly
 // started game or browser) immediately receive the volume their slider dictates.
 func (m *sessionMap) applyCurrentSliderValues() {
+	m.lastVolumeApply = time.Now()
+
 	sliderValues := m.deej.serial.currentSliderPercentValues
 
 	if len(sliderValues) == 0 {
@@ -235,17 +304,20 @@ func (m *sessionMap) applyCurrentSliderValues() {
 				}
 
 				for _, session := range sessions {
-					if session.GetVolume() != percentValue {
-						if err := session.SetVolume(percentValue); err != nil {
-							m.logger.Warnw("Failed to apply slider value to new session",
-								"target", resolvedTarget,
-								"error", err)
-						} else {
-							m.logger.Debugw("Applied current slider value to session after refresh",
-								"target", resolvedTarget,
-								"sliderIdx", sliderIdx,
-								"value", percentValue)
-						}
+					// always set — don't read first. PulseAudio's module-stream-restore
+					// may restore a different volume after session creation, so we
+					// unconditionally enforce the slider value on every tick.
+					if err := session.SetVolume(percentValue); err != nil {
+						m.logger.Debugw("Failed to apply slider value to session, will re-acquire on next refresh",
+							"target", resolvedTarget,
+							"error", err)
+						// session is stale (e.g. app closed) — trigger a refresh so it gets cleaned up
+						go m.refreshSessions(false)
+					} else {
+						m.logger.Debugw("Enforced slider value on session",
+							"target", resolvedTarget,
+							"sliderIdx", sliderIdx,
+							"value", percentValue)
 					}
 				}
 			}
