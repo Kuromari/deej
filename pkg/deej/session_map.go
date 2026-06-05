@@ -81,6 +81,7 @@ func (m *sessionMap) initialize() error {
 
 	m.setupOnConfigReload()
 	m.setupOnSliderMove()
+	m.setupPeriodicRefresh()
 
 	return nil
 }
@@ -149,6 +150,35 @@ func (m *sessionMap) setupOnSliderMove() {
 	}()
 }
 
+// setupPeriodicRefresh runs a background goroutine that periodically checks for new
+// audio sessions on Linux. When a new app starts playing audio (e.g. a game, browser,
+// or media player), its volume is set immediately to whatever the matching slider
+// currently shows — no need to wiggle the slider first.
+//
+// The ticker respects the same minTimeBetweenSessionRefreshes cooldown used elsewhere,
+// so it will simply be a no-op during periods of normal slider activity.
+func (m *sessionMap) setupPeriodicRefresh() {
+	// only active on Linux, where PulseAudio sessions appear dynamically
+	if !util.Linux() {
+		return
+	}
+
+	const periodicRefreshInterval = 25 * time.Millisecond
+
+	go func() {
+		ticker := time.NewTicker(periodicRefreshInterval)
+		defer ticker.Stop()
+
+		for {
+			<-ticker.C
+
+			// refreshSessions already respects minTimeBetweenSessionRefreshes,
+			// so this call is effectively rate-limited and safe to fire frequently.
+			m.refreshSessions(false)
+		}
+	}()
+}
+
 // performance: explain why force == true at every such use to avoid unintended forced refresh spams
 func (m *sessionMap) refreshSessions(force bool) {
 
@@ -164,7 +194,63 @@ func (m *sessionMap) refreshSessions(force bool) {
 		m.logger.Warnw("Failed to re-acquire all audio sessions", "error", err)
 	} else {
 		m.logger.Debug("Re-acquired sessions successfully")
+
+		// immediately apply current slider values to all newly discovered sessions.
+		// this ensures that any app that opened audio after the last refresh gets the
+		// correct volume right away, without requiring the user to move a slider first.
+		m.applyCurrentSliderValues()
 	}
+}
+
+// applyCurrentSliderValues iterates all slider mappings and applies the last known
+// slider percent value to every session currently in the map.
+// This is called after a session refresh so that new audio sessions (e.g. a freshly
+// started game or browser) immediately receive the volume their slider dictates.
+func (m *sessionMap) applyCurrentSliderValues() {
+	sliderValues := m.deej.serial.currentSliderPercentValues
+
+	if len(sliderValues) == 0 {
+		return
+	}
+
+	m.deej.config.SliderMapping.iterate(func(sliderIdx int, targets []string) {
+		if sliderIdx >= len(sliderValues) {
+			return
+		}
+
+		percentValue := sliderValues[sliderIdx]
+
+		// skip sliders that haven't been read yet (initial value -1)
+		if percentValue < 0 {
+			return
+		}
+
+		for _, target := range targets {
+			resolvedTargets := m.resolveTarget(target)
+
+			for _, resolvedTarget := range resolvedTargets {
+				sessions, ok := m.get(resolvedTarget)
+				if !ok {
+					continue
+				}
+
+				for _, session := range sessions {
+					if session.GetVolume() != percentValue {
+						if err := session.SetVolume(percentValue); err != nil {
+							m.logger.Warnw("Failed to apply slider value to new session",
+								"target", resolvedTarget,
+								"error", err)
+						} else {
+							m.logger.Debugw("Applied current slider value to session after refresh",
+								"target", resolvedTarget,
+								"sliderIdx", sliderIdx,
+								"value", percentValue)
+						}
+					}
+				}
+			}
+		}
+	})
 }
 
 // returns true if a session is not currently mapped to any slider, false otherwise
