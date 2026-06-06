@@ -132,27 +132,19 @@ func (m *sessionMap) getAndAddSessions() error {
 
 func (m *sessionMap) setupOnConfigReload() {
 	configReloadedChannel := m.deej.config.SubscribeToChanges()
-
 	go func() {
-		for {
-			select {
-			case <-configReloadedChannel:
-				m.logger.Info("Detected config reload, attempting to re-acquire all audio sessions")
-				m.refreshSessions(false)
-			}
+		for range configReloadedChannel {
+			m.logger.Info("Detected config reload, attempting to re-acquire all audio sessions")
+			m.refreshSessions(false)
 		}
 	}()
 }
 
 func (m *sessionMap) setupOnSliderMove() {
 	sliderEventsChannel := m.deej.serial.SubscribeToSliderMoveEvents()
-
 	go func() {
-		for {
-			select {
-			case event := <-sliderEventsChannel:
-				m.handleSliderMoveEvent(event)
-			}
+		for event := range sliderEventsChannel {
+			m.handleSliderMoveEvent(event)
 		}
 	}()
 }
@@ -177,8 +169,6 @@ func (m *sessionMap) setupOnChangedSinkInput() {
 		for range ch {
 
 			if time.Since(m.lastVolumeApply) < eventCooldown {
-				m.logger.Debugw("Ignoring PA event during cooldown after volume apply",
-					"sinkInputIndex", -1)
 				continue
 			}
 
@@ -203,8 +193,6 @@ func (m *sessionMap) setupOnNewSinkInput() {
 			// Ignore events that arrived within the cooldown window after our own
 			// SetVolume calls — pactl subscribe also reports those as 'change' events.
 			if time.Since(m.lastVolumeApply) < eventCooldown {
-				m.logger.Debugw("Ignoring PA event during cooldown after volume apply",
-					"sinkInputIndex", sinkInputIndex)
 				continue
 			}
 
@@ -213,15 +201,6 @@ func (m *sessionMap) setupOnNewSinkInput() {
 
 			// Full refresh once so the new session is in the map.
 			m.refreshSessions(true)
-
-			// Then hammer only the volume-apply (cheap) for 1 second to beat
-			// module-stream-restore, which may restore its own value shortly after.
-			go func() {
-				for i := 0; i < 10; i++ {
-					time.Sleep(100 * time.Millisecond)
-					m.applyCurrentSliderValues()
-				}
-			}()
 		}
 	}()
 }

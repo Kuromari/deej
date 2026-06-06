@@ -152,35 +152,31 @@ func (sio *SerialIO) setupOnConfigReload() {
 	const stopDelay = 50 * time.Millisecond
 
 	go func() {
-		for {
-			select {
-			case <-configReloadedChannel:
+		for range configReloadedChannel {
+			// make any config reload unset our slider number to ensure process volumes are being re-set
+			// (the next read line will emit SliderMoveEvent instances for all sliders)\
+			// this needs to happen after a small delay, because the session map will also re-acquire sessions
+			// whenever the config file is reloaded, and we don't want it to receive these move events while the map
+			// is still cleared. this is kind of ugly, but shouldn't cause any issues
+			go func() {
+				<-time.After(stopDelay)
+				sio.lastKnownNumSliders = 0
+			}()
 
-				// make any config reload unset our slider number to ensure process volumes are being re-set
-				// (the next read line will emit SliderMoveEvent instances for all sliders)\
-				// this needs to happen after a small delay, because the session map will also re-acquire sessions
-				// whenever the config file is reloaded, and we don't want it to receive these move events while the map
-				// is still cleared. this is kind of ugly, but shouldn't cause any issues
-				go func() {
-					<-time.After(stopDelay)
-					sio.lastKnownNumSliders = 0
-				}()
+			// if connection params have changed, attempt to stop and start the connection
+			if sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
+				uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate {
 
-				// if connection params have changed, attempt to stop and start the connection
-				if sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
-					uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate {
+				sio.logger.Info("Detected change in connection parameters, attempting to renew connection")
+				sio.Stop()
 
-					sio.logger.Info("Detected change in connection parameters, attempting to renew connection")
-					sio.Stop()
+				// let the connection close
+				<-time.After(stopDelay)
 
-					// let the connection close
-					<-time.After(stopDelay)
-
-					if err := sio.Start(); err != nil {
-						sio.logger.Warnw("Failed to renew connection after parameter change", "error", err)
-					} else {
-						sio.logger.Debug("Renewed connection successfully")
-					}
+				if err := sio.Start(); err != nil {
+					sio.logger.Warnw("Failed to renew connection after parameter change", "error", err)
+				} else {
+					sio.logger.Debug("Renewed connection successfully")
 				}
 			}
 		}
