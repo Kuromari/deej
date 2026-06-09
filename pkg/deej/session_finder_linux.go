@@ -61,21 +61,14 @@ func newSessionFinder(logger *zap.SugaredLogger) (SessionFinder, error) {
 		changedSinkInputCh: make(chan uint32, 16),
 	}
 
-	// Start pactl subscribe as a subprocess to receive PulseAudio/PipeWire events.
-	// The native proto.Subscribe is blocked by PipeWire for clients without active
-	// streams, so we use pactl which always has the necessary permissions.
 	sf.startPactlSubscribe()
 
 	sf.logger.Debug("Created PA session finder instance")
 	return sf, nil
 }
 
-// startPactlSubscribe launches "pactl subscribe" and parses its output line by line.
-// Lines like "Event 'new' on sink-input #42" trigger a session refresh.
 func (sf *paSessionFinder) startPactlSubscribe() {
 	cmd := exec.Command("pactl", "subscribe")
-	// Put the subprocess in its own process group so we can kill it cleanly
-	// without affecting deej itself when we send SIGKILL on release.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	sf.pactlCmd = cmd
 
@@ -109,7 +102,7 @@ func (sf *paSessionFinder) startPactlSubscribe() {
 			if isNew {
 				sf.logger.Debugw("New sink input detected via pactl")
 				select {
-				case sf.newSinkInputCh <- 0: // index not needed, we do a full refresh
+				case sf.newSinkInputCh <- 0:
 				default:
 				}
 			} else if isChange {
@@ -164,7 +157,6 @@ func (sf *paSessionFinder) GetAllSessions() ([]Session, error) {
 
 func (sf *paSessionFinder) Release() error {
 	if sf.pactlCmd != nil && sf.pactlCmd.Process != nil {
-		// Kill the entire process group to ensure pactl and any children exit
 		pgid, err := syscall.Getpgid(sf.pactlCmd.Process.Pid)
 		if err == nil {
 			syscall.Kill(-pgid, syscall.SIGKILL)
@@ -207,6 +199,26 @@ func (sf *paSessionFinder) getMasterSourceSession() (Session, error) {
 	return newMasterSession(sf.sessionLogger, sf.client, reply.SourceIndex, reply.Channels, false), nil
 }
 
+// getSessionName resolves the best display name for a sink input.
+// Priority: application.name → node.name → application.process.binary
+// This covers standard apps (application.name), PipeWire/Java apps (node.name),
+// and native Linux apps that only set process.binary.
+func (sf *paSessionFinder) getSessionName(info *proto.GetSinkInputInfoReply) (string, bool) {
+	for _, key := range []string{"application.name", "node.name", "application.process.binary"} {
+		if val, ok := info.Properties[key]; ok {
+			name := val.String()
+			if name != "" {
+				sf.logger.Debugw("Resolved session name",
+					"key", key,
+					"name", name,
+					"sinkInputIndex", info.SinkInputIndex)
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
 func (sf *paSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 	request := proto.GetSinkInputInfoList{}
 	reply := proto.GetSinkInputInfoListReply{}
@@ -217,13 +229,13 @@ func (sf *paSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 	}
 
 	for _, info := range reply {
-		name, ok := info.Properties["application.name"]
+		name, ok := sf.getSessionName(info)
 		if !ok {
-			sf.logger.Debugw("Skipping sink input without process name",
+			sf.logger.Debugw("Skipping sink input: no usable name found",
 				"sinkInputIndex", info.SinkInputIndex)
 			continue
 		}
-		newSession := newPASession(sf.sessionLogger, sf.client, info.SinkInputIndex, info.Channels, name.String())
+		newSession := newPASession(sf.sessionLogger, sf.client, info.SinkInputIndex, info.Channels, name)
 		*sessions = append(*sessions, newSession)
 	}
 
