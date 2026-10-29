@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jacobsa/go-serial/serial"
@@ -33,6 +35,11 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+
+	// two-way communication: writes are serialized, and the board announces itself with "READY"
+	writeMutex      sync.Mutex
+	boardReady      int32
+	boardReadyHooks []func()
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -109,6 +116,10 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
+	// ping the board until it answers, so it can get its LED colors (see handshake)
+	atomic.StoreInt32(&sio.boardReady, 0)
+	go sio.handshake(namedLogger)
+
 	// read lines or await a stop
 	go func() {
 		connReader := bufio.NewReader(sio.conn)
@@ -125,6 +136,66 @@ func (sio *SerialIO) Start() error {
 	}()
 
 	return nil
+}
+
+// Write sends a raw line to the board. Safe to call from multiple goroutines
+func (sio *SerialIO) Write(data string) error {
+	sio.writeMutex.Lock()
+	defer sio.writeMutex.Unlock()
+
+	if !sio.connected || sio.conn == nil {
+		return errors.New("serial: not connected")
+	}
+
+	if _, err := sio.conn.Write([]byte(data)); err != nil {
+		return fmt.Errorf("serial write: %w", err)
+	}
+
+	return nil
+}
+
+// Connected returns whether a serial connection is currently open
+func (sio *SerialIO) Connected() bool {
+	return sio.connected
+}
+
+// BoardReady returns whether the board has answered our handshake on this connection
+func (sio *SerialIO) BoardReady() bool {
+	return atomic.LoadInt32(&sio.boardReady) == 1
+}
+
+// OnBoardReady registers a function that's called whenever the board says it's
+// ready (after boot, or as an answer to our ping). Must be called before Start
+func (sio *SerialIO) OnBoardReady(hook func()) {
+	sio.boardReadyHooks = append(sio.boardReadyHooks, hook)
+}
+
+// handshake pings the board until it answers with READY. Opening the port
+// resets some boards (Uno/Nano) and swallows whatever we send during boot, so
+// a single blind write wouldn't be reliable. Boards that run the vanilla
+// sketch never answer; the pings are harmless and we give up after a while
+func (sio *SerialIO) handshake(logger *zap.SugaredLogger) {
+	const (
+		attempts = 20
+		interval = 500 * time.Millisecond
+	)
+
+	for i := 0; i < attempts; i++ {
+		if sio.BoardReady() || !sio.connected {
+			return
+		}
+
+		if err := sio.Write("?\n"); err != nil {
+			logger.Debugw("Failed to send handshake ping", "error", err)
+			return
+		}
+
+		time.Sleep(interval)
+	}
+
+	if !sio.BoardReady() {
+		logger.Info("Board didn't answer the handshake - it's probably running a sketch without LED support")
+	}
 }
 
 // Stop signals us to shut down our serial connection, if one is active
@@ -190,8 +261,10 @@ func (sio *SerialIO) close(logger *zap.SugaredLogger) {
 		logger.Debug("Serial connection closed")
 	}
 
+	sio.writeMutex.Lock()
 	sio.conn = nil
 	sio.connected = false
+	sio.writeMutex.Unlock()
 }
 
 func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) chan string {
@@ -223,6 +296,18 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 }
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
+
+	// the board announces itself on boot and answers our pings with READY
+	if strings.TrimSpace(line) == "READY" {
+		logger.Info("Board is ready")
+		atomic.StoreInt32(&sio.boardReady, 1)
+
+		for _, hook := range sio.boardReadyHooks {
+			go hook()
+		}
+
+		return
+	}
 
 	// this function receives an unsanitized line which is guaranteed to end with LF,
 	// but most lines will end with CRLF. it may also have garbage instead of

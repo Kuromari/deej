@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -24,6 +25,7 @@ type Deej struct {
 	notifier Notifier
 	config   *CanonicalConfig
 	serial   *SerialIO
+	leds     *LEDController
 	sessions *sessionMap
 
 	stopChannel chan bool
@@ -62,6 +64,9 @@ func NewDeej(logger *zap.SugaredLogger, verbose bool) (*Deej, error) {
 	}
 
 	d.serial = serial
+
+	d.leds = NewLEDController(logger, serial, d.ledSliderCount, d.ledSliderLabels)
+	serial.OnBoardReady(d.leds.PushAll)
 
 	sessionFinder, err := newSessionFinder(logger)
 	if err != nil {
@@ -113,6 +118,43 @@ func (d *Deej) Initialize() error {
 	}
 
 	return nil
+}
+
+// ledSliderCount returns how many sliders the LED code should care about:
+// whatever the board reports, falling back to the highest mapped slider
+func (d *Deej) ledSliderCount() int {
+	n := d.serial.lastKnownNumSliders
+
+	if n <= 0 && d.config.SliderMapping != nil {
+		d.config.SliderMapping.iterate(func(idx int, _ []string) {
+			if idx+1 > n {
+				n = idx + 1
+			}
+		})
+	}
+
+	if n <= 0 {
+		n = 5
+	}
+
+	return n
+}
+
+// ledSliderLabels returns a short description of what each slider controls
+func (d *Deej) ledSliderLabels(n int) []string {
+	labels := make([]string, n)
+
+	if d.config.SliderMapping == nil {
+		return labels
+	}
+
+	for i := 0; i < n; i++ {
+		if targets, ok := d.config.SliderMapping.get(i); ok {
+			labels[i] = strings.Join(targets, ", ")
+		}
+	}
+
+	return labels
 }
 
 // SetVersion causes deej to add a version string to its tray menu if called before Initialize

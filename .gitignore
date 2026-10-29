@@ -14,3 +14,7 @@ logs/
 preferences.yaml
 config.yaml
 main
+leds.json
+leds.json.tmp
+vendor
+deej

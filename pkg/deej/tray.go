@@ -17,6 +17,8 @@ func (d *Deej) initializeTray(onDone func()) {
 		systray.SetTitle("deej")
 		systray.SetTooltip("deej")
 
+		ledColors := systray.AddMenuItem("LED-Farben…", "LED-Farben und Verläufe pro Slider einstellen")
+
 		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with notepad")
 		editConfig.SetIcon(icon.EditConfig)
 
@@ -42,6 +44,15 @@ func (d *Deej) initializeTray(onDone func()) {
 					logger.Info("Quit menu item clicked, stopping")
 
 					d.signalStop()
+
+				// led colors
+				case <-ledColors.ClickedCh:
+					logger.Info("LED colors menu item clicked, opening settings page")
+
+					if err := d.leds.OpenUI(); err != nil {
+						logger.Warnw("Failed to open LED settings page", "error", err)
+						d.notifier.Notify("Can't open LED settings", err.Error())
+					}
 
 				// edit config
 				case <-editConfig.ClickedCh:

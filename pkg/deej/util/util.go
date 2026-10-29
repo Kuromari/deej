@@ -75,6 +75,24 @@ func OpenExternal(logger *zap.SugaredLogger, cmd string, arg string) error {
 	return nil
 }
 
+// OpenBrowser opens the given URL in the user's default browser without waiting for it
+func OpenBrowser(logger *zap.SugaredLogger, url string) error {
+	command := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	if Linux() {
+		command = exec.Command("xdg-open", url)
+	}
+
+	if err := command.Start(); err != nil {
+		logger.Warnw("Failed to open browser", "error", err)
+		return fmt.Errorf("open browser: %w", err)
+	}
+
+	// reap the process so it doesn't linger as a zombie
+	go command.Wait()
+
+	return nil
+}
+
 // NormalizeScalar "trims" the given float32 to 2 points of precision (e.g. 0.15442 -> 0.15)
 // This is used both for windows core audio volume levels and for cleaning up slider level values from serial
 func NormalizeScalar(v float32) float32 {
