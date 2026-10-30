@@ -18,3 +18,4 @@ leds.json
 leds.json.tmp
 vendor
 deej
+!pkg/deej

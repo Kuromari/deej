@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deej – LED-Farben</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1c1d21; --muted: #6b7078;
+    --border: #dcdfe4; --accent: #3b82f6; --ok: #22a559; --warn: #d98b00; --bad: #d64545;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181b; --card: #212328; --text: #eceef1; --muted: #9aa0a9;
+      --border: #34373e; --accent: #5b9bff; --ok: #3ecf7a; --warn: #f0b13a; --bad: #ff6b6b;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 14px 40px; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  h1 { font-size: 18px; margin: 0; }
+  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+          color: var(--muted); white-space: nowrap; }
+  .pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                  margin-right: 6px; background: var(--muted); }
+  .pill.ok::before { background: var(--ok); } .pill.warn::before { background: var(--warn); }
+  .pill.bad::before { background: var(--bad); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+          padding: 12px 14px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .title { font-weight: 600; }
+  .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .grow { flex: 1; min-width: 0; }
+  .bar { height: 16px; border-radius: 8px; margin: 10px 0; border: 1px solid var(--border); }
+  input[type=color] { width: 38px; height: 30px; padding: 0; border: 1px solid var(--border);
+                      border-radius: 8px; background: none; cursor: pointer; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  button, select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border);
+                   border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button.icon { padding: 4px 8px; }
+  .stop { display: inline-flex; align-items: center; gap: 2px; }
+  .stop .x { border: none; background: none; color: var(--muted); padding: 0 4px; }
+  .stop .x:hover { color: var(--bad); }
+  .tools { margin-top: 2px; }
+  #status { margin-top: 14px; min-height: 18px; color: var(--muted); font-size: 12px; text-align: center; }
+  #status.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>deej – LED-Farben</h1>
+    <span id="conn" class="pill">…</span>
+  </header>
+
+  <div class="card">
+    <div class="row"><span class="title grow">Helligkeit</span><span id="brightLabel" class="sub"></span></div>
+    <input id="brightness" type="range" min="0" max="100" step="1">
+  </div>
+
+  <div id="sliders"></div>
+  <div id="status"></div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN = "__DEEJ_TOKEN__";
+  var MAX_STOPS = 4;
+  var PRESETS = {
+    "Sonnenuntergang": ["#ff5f6d", "#ffc371"],
+    "Ozean":           ["#00c6ff", "#0072ff"],
+    "Feuer":           ["#ff0000", "#ff8800", "#ffee00"],
+    "Wald":            ["#134e5e", "#71b280"],
+    "Neon":            ["#ff00cc", "#3333ff"],
+    "Regenbogen":      ["#ff0000", "#ffee00", "#00ff66", "#0066ff"],
+    "Weiß":            ["#ffffff"]
+  };
+
+  var state = null;          // last state from the server
+  var previewTimer = null;   // throttles live preview
+  var saveTimer = null;      // debounces persisting
+  var statusEl = document.getElementById("status");
+
+  function api(path, options) {
+    options = options || {};
+    options.headers = Object.assign({ "X-Deej-Token": TOKEN }, options.headers || {});
+    return fetch(path, options).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) { throw new Error(body.error || ("HTTP " + res.status)); }
+        return body;
+      });
+    });
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text || "";
+    statusEl.className = isError ? "err" : "";
+  }
+
+  // ---- sending -----------------------------------------------------------
+
+  function send(save) {
+    return api("/api/leds?save=" + (save ? "1" : "0"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.settings)
+    }).then(function () {
+      if (save) { setStatus("Gespeichert ✓"); }
+    }).catch(function (err) { setStatus(err.message, true); });
+  }
+
+  // called after every edit: live preview (throttled), save once things settle
+  function changed() {
+    setStatus("");
+    if (!previewTimer) {
+      previewTimer = setTimeout(function () { previewTimer = null; send(false); }, 60);
+    }
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () { send(true); }, 700);
+  }
+
+  // ---- rendering ---------------------------------------------------------
+
+  function gradientCSS(stops) {
+    return stops.length === 1 ? stops[0] : "linear-gradient(90deg, " + stops.join(", ") + ")";
+  }
+
+  function el(tag, props, children) {
+    var node = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === "text") { node.textContent = props[k]; }
+      else if (k === "class") { node.className = props[k]; }
+      else if (k.indexOf("on") === 0) { node.addEventListener(k.slice(2), props[k]); }
+      else { node.setAttribute(k, props[k]); }
+    });
+    (children || []).forEach(function (c) { node.appendChild(c); });
+    return node;
+  }
+
+  function renderCard(i) {
+    var slider = state.settings.sliders[i];
+    var label = state.labels[i] || "";
+    var bar = el("div", { class: "bar" });
+    var card = el("div", { class: "card" });
+
+    function paintBar() { bar.style.background = gradientCSS(slider.stops); }
+
+    function rebuild() {
+      var fresh = renderCard(i);
+      card.replaceWith(fresh);
+    }
+
+    var stopsRow = el("div", { class: "row" });
+    slider.stops.forEach(function (color, k) {
+      var picker = el("input", { type: "color", value: color, title: "Farbe " + (k + 1) });
+      picker.addEventListener("input", function () {
+        slider.stops[k] = picker.value;
+        paintBar();
+        changed();
+      });
+
+      var stop = el("span", { class: "stop" }, [picker]);
+      if (slider.stops.length > 1) {
+        stop.appendChild(el("button", {
+          class: "x", title: "Farbe entfernen", text: "✕",
+          onclick: function () { slider.stops.splice(k, 1); changed(); rebuild(); }
+        }));
+      }
+      stopsRow.appendChild(stop);
+    });
+
+    var tools = el("div", { class: "row tools" });
+
+    if (slider.stops.length < MAX_STOPS) {
+      tools.appendChild(el("button", {
+        class: "icon", title: "Farbe hinzufügen (Verlauf)", text: "＋",
+        onclick: function () { slider.stops.push(slider.stops[slider.stops.length - 1]); changed(); rebuild(); }
+      }));
+    }
+
+    if (slider.stops.length > 1) {
+      tools.appendChild(el("button", {
+        class: "icon", title: "Richtung umkehren", text: "⇄",
+        onclick: function () { slider.stops.reverse(); changed(); rebuild(); }
+      }));
+    }
+
+    var presetSelect = el("select", { title: "Vorlage" }, [el("option", { value: "", text: "Vorlage…" })]);
+    Object.keys(PRESETS).forEach(function (name) {
+      presetSelect.appendChild(el("option", { value: name, text: name }));
+    });
+    presetSelect.addEventListener("change", function () {
+      if (!presetSelect.value) { return; }
+      slider.stops = PRESETS[presetSelect.value].slice();
+      changed();
+      rebuild();
+    });
+    tools.appendChild(presetSelect);
+
+    tools.appendChild(el("button", {
+      text: "Auf alle",
+      title: "Diese Farben für alle Slider übernehmen",
+      onclick: function () {
+        state.settings.sliders.forEach(function (s) { s.stops = slider.stops.slice(); });
+        changed();
+        render();
+      }
+    }));
+
+    card.appendChild(el("div", { class: "row" }, [
+      el("span", { class: "title", text: "Slider " + (i + 1) }),
+      el("span", { class: "sub grow", text: label })
+    ]));
+    card.appendChild(bar);
+    card.appendChild(stopsRow);
+    card.appendChild(tools);
+    paintBar();
+
+    return card;
+  }
+
+  function render() {
+    var container = document.getElementById("sliders");
+    container.textContent = "";
+    for (var i = 0; i < state.numSliders; i++) {
+      container.appendChild(renderCard(i));
+    }
+  }
+
+  function renderConnection() {
+    var pill = document.getElementById("conn");
+    if (!state.connected) {
+      pill.textContent = "Board nicht verbunden"; pill.className = "pill bad";
+    } else if (!state.boardReady) {
+      pill.textContent = "Board antwortet nicht (Sketch ohne LED-Support?)"; pill.className = "pill warn";
+    } else {
+      pill.textContent = "Board verbunden"; pill.className = "pill ok";
+    }
+  }
+
+  // ---- brightness --------------------------------------------------------
+
+  var brightness = document.getElementById("brightness");
+  var brightLabel = document.getElementById("brightLabel");
+
+  function showBrightness() {
+    brightness.value = Math.round(state.settings.brightness / 255 * 100);
+    brightLabel.textContent = brightness.value + " %";
+  }
+
+  brightness.addEventListener("input", function () {
+    state.settings.brightness = Math.round(brightness.value / 100 * 255);
+    brightLabel.textContent = brightness.value + " %";
+    changed();
+  });
+
+  // ---- init --------------------------------------------------------------
+
+  function refreshConnectionOnly() {
+    api("/api/state").then(function (s) {
+      state.connected = s.connected;
+      state.boardReady = s.boardReady;
+      renderConnection();
+    }).catch(function () {
+      document.getElementById("conn").textContent = "deej nicht erreichbar";
+      document.getElementById("conn").className = "pill bad";
+    });
+  }
+
+  api("/api/state").then(function (s) {
+    state = s;
+    renderConnection();
+    showBrightness();
+    render();
+    // only poll the status afterwards, so we never overwrite what's being edited
+    setInterval(refreshConnectionOnly, 3000);
+  }).catch(function (err) {
+    setStatus("Konnte Einstellungen nicht laden: " + err.message, true);
+  });
+})();
+</script>
+</body>
+</html>
