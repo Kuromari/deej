@@ -51,7 +51,7 @@ const bool CALIBRATION_MODE = false;
 
 // LEDs only follow the slider if it moved at least this much (of 1023), so
 // analog noise doesn't make the last LED flicker
-const int LED_DEADBAND = 4;
+const int LED_DEADBAND = 10;
 
 // every slider keeps its last SMOOTH_SAMPLES raw readings and reports the
 // highest of them, which suppresses single downward spikes (flicker)
