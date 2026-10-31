@@ -13,9 +13,13 @@
 //                                        e.g.  L2:ff0000,0000ff
 //     B<0-255>                           global brightness
 //     ?                                  ping, board answers with READY
+//     H                                  heartbeat, board answers with HB. deej sends it
+//                                        every few seconds and reconnects if the answer
+//                                        stays away
 //   board -> PC
 //     v0|v1|v2|v3|v4                     slider values (unchanged from vanilla deej)
 //     READY                              sent on boot and as answer to '?'
+//     HB                                 answer to 'H'
 //
 // LED behavior: each strip works as a level meter. LEDs light up from LED 0
 // up to the slider position, the color of each LED comes from the slider's
@@ -49,12 +53,18 @@ const bool CALIBRATION_MODE = false;
 // analog noise doesn't make the last LED flicker
 const int LED_DEADBAND = 4;
 
+// every slider keeps its last SMOOTH_SAMPLES raw readings and reports the
+// highest of them, which suppresses single downward spikes (flicker)
+const uint8_t SMOOTH_SAMPLES = 10;
+
 // default-constructed and configured in setup(): copying NeoPixel objects
 // (e.g. via an initializer list) would free their pixel buffers twice
 Adafruit_NeoPixel strips[NUM_SLIDERS];
 
 int analogSliderValues[NUM_SLIDERS]; // calibrated, 0-1023
 int ledLevelValues[NUM_SLIDERS];     // value the LEDs currently show (deadbanded)
+int rawHistory[NUM_SLIDERS][SMOOTH_SAMPLES]; // ring buffer of raw readings
+uint8_t historyPos = 0;
 int seenMin[NUM_SLIDERS];            // calibration mode only
 int seenMax[NUM_SLIDERS];
 unsigned long lastCalReport = 0;
@@ -77,6 +87,12 @@ void setup() {
     stopCount[i] = 1; // black until the PC tells us otherwise
     seenMin[i] = 1023;
     seenMax[i] = 0;
+
+    // prefill the history so the first values aren't dragged down by zeros
+    int first = analogRead(analogInputs[i]);
+    for (uint8_t k = 0; k < SMOOTH_SAMPLES; k++) {
+      rawHistory[i][k] = first;
+    }
   }
 
   for (int i = 0; i < NUM_SLIDERS; i++) {
@@ -142,11 +158,18 @@ void reportCalibration() {
 
 void updateSliderValues() {
   for (int i = 0; i < NUM_SLIDERS; i++) {
-    int raw = analogRead(analogInputs[i]);
-    if (raw < seenMin[i]) seenMin[i] = raw;
-    if (raw > seenMax[i]) seenMax[i] = raw;
+    int reading = analogRead(analogInputs[i]);
+    if (reading < seenMin[i]) seenMin[i] = reading;
+    if (reading > seenMax[i]) seenMax[i] = reading;
 
-    // in calibration mode we pass the raw value through untouched
+    // store the reading and take the highest of the last SMOOTH_SAMPLES
+    rawHistory[i][historyPos] = reading;
+    int raw = rawHistory[i][0];
+    for (uint8_t k = 1; k < SMOOTH_SAMPLES; k++) {
+      if (rawHistory[i][k] > raw) raw = rawHistory[i][k];
+    }
+
+    // in calibration mode we pass the (smoothed) raw value through uncalibrated
     int value = CALIBRATION_MODE ? raw : calibrate(raw);
     analogSliderValues[i] = value;
 
@@ -158,6 +181,8 @@ void updateSliderValues() {
       sliderDirty[i] = true;
     }
   }
+
+  historyPos = (historyPos + 1) % SMOOTH_SAMPLES;
 }
 
 void sendSliderValues() {
@@ -202,6 +227,10 @@ void handleCommand(const char *line) {
   switch (line[0]) {
     case '?':
       Serial.println("READY");
+      break;
+
+    case 'H':
+      Serial.println("HB");
       break;
 
     case 'B': {

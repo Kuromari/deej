@@ -18,6 +18,26 @@ import (
 	"github.com/omriharel/deej/pkg/deej/util"
 )
 
+const (
+	// how often we ping the board (only boards that answered our handshake)
+	heartbeatInterval = 2 * time.Second
+
+	// reconnect if the board stopped answering pings for this long
+	heartbeatTimeout = 6 * time.Second
+
+	// reconnect if nothing at all (no slider data, no answers) arrived for this long.
+	// this is the fallback for boards running a sketch without heartbeat support
+	silenceTimeout = 5 * time.Second
+
+	watchdogTick = time.Second
+
+	// pings without an answer after which we assume the sketch has no heartbeat support
+	heartbeatUnsupportedAfter = 5
+
+	reconnectMinDelay = 500 * time.Millisecond
+	reconnectMaxDelay = 5 * time.Second
+)
+
 // SerialIO provides a deej-aware abstraction layer to managing serial I/O
 type SerialIO struct {
 	comPort  string
@@ -26,11 +46,22 @@ type SerialIO struct {
 	deej   *Deej
 	logger *zap.SugaredLogger
 
-	stopChannel chan bool
-	connected   bool
 	connOptions serial.OpenOptions
-	conn        io.ReadWriteCloser
 
+	// stateMu guards conn, connDone, connID, userStopped and reconnecting.
+	// lock order: writeMutex -> stateMu (never the other way around)
+	stateMu      sync.Mutex
+	conn         io.ReadWriteCloser
+	connDone     chan struct{} // closed when the current connection is torn down
+	connID       uint64        // incremented on every successful open, so stale goroutines can tell
+	userStopped  bool          // Stop() was called: don't reconnect on our own
+	reconnecting bool
+
+	connected int32 // atomic mirror of (conn != nil), for lock-free reads
+
+	// lineMu serializes line handling, so a reader that's still finishing its last
+	// line after a reconnect can't race with the new connection's reader
+	lineMu                     sync.Mutex
 	lastKnownNumSliders        int
 	currentSliderPercentValues []float32
 
@@ -40,6 +71,12 @@ type SerialIO struct {
 	writeMutex      sync.Mutex
 	boardReady      int32
 	boardReadyHooks []func()
+
+	// liveness tracking, as nanoseconds since epoch (monotonic, immune to wall clock jumps)
+	epoch            time.Time
+	lastRx           int64 // last line of any kind received
+	lastHeartbeatAck int64 // last "HB" received
+	heartbeatSeen    int32 // board has answered at least one heartbeat on this connection
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -58,9 +95,7 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	sio := &SerialIO{
 		deej:                deej,
 		logger:              logger,
-		stopChannel:         make(chan bool),
-		connected:           false,
-		conn:                nil,
+		epoch:               time.Now(),
 		sliderMoveConsumers: []chan SliderMoveEvent{},
 	}
 
@@ -72,14 +107,37 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	return sio, nil
 }
 
+// nowNanos returns a monotonic timestamp for the liveness counters
+func (sio *SerialIO) nowNanos() int64 {
+	return int64(time.Since(sio.epoch))
+}
+
 // Start attempts to connect to our arduino chip
 func (sio *SerialIO) Start() error {
+	sio.stateMu.Lock()
+	defer sio.stateMu.Unlock()
 
 	// don't allow multiple concurrent connections
-	if sio.connected {
+	if sio.conn != nil {
 		sio.logger.Warn("Already connected, can't start another without closing first")
 		return errors.New("serial: connection already active")
 	}
+
+	// an explicit Start means we want to be connected (again)
+	sio.userStopped = false
+
+	if err := sio.openLocked(); err != nil {
+		// might need a user notification here, TBD
+		sio.logger.Warnw("Failed to open serial connection", "error", err)
+		return err
+	}
+
+	return nil
+}
+
+// openLocked opens the port and spawns the goroutines that serve this connection.
+// must be called with sio.stateMu held and no active connection
+func (sio *SerialIO) openLocked() error {
 
 	// set minimum read size according to platform (0 for windows, 1 for linux)
 	// this prevents a rare bug on windows where serial reads get congested,
@@ -102,40 +160,152 @@ func (sio *SerialIO) Start() error {
 		"baudRate", sio.connOptions.BaudRate,
 		"minReadSize", minimumReadSize)
 
-	var err error
-	sio.conn, err = serial.Open(sio.connOptions)
+	conn, err := serial.Open(sio.connOptions)
 	if err != nil {
-
-		// might need a user notification here, TBD
-		sio.logger.Warnw("Failed to open serial connection", "error", err)
 		return fmt.Errorf("open serial connection: %w", err)
 	}
 
 	namedLogger := sio.logger.Named(strings.ToLower(sio.connOptions.PortName))
+	namedLogger.Infow("Connected", "conn", conn)
 
-	namedLogger.Infow("Connected", "conn", sio.conn)
-	sio.connected = true
+	sio.connID++
+	id := sio.connID
+	done := make(chan struct{})
+
+	sio.conn = conn
+	sio.connDone = done
+
+	atomic.StoreInt32(&sio.connected, 1)
+	atomic.StoreInt32(&sio.boardReady, 0)
+	atomic.StoreInt32(&sio.heartbeatSeen, 0)
+
+	now := sio.nowNanos()
+	atomic.StoreInt64(&sio.lastRx, now)
+	atomic.StoreInt64(&sio.lastHeartbeatAck, now)
+
+	// make the next line re-emit slider move events for all sliders, so volumes
+	// are re-applied after a reconnect
+	sio.lineMu.Lock()
+	sio.lastKnownNumSliders = 0
+	sio.lineMu.Unlock()
 
 	// ping the board until it answers, so it can get its LED colors (see handshake)
-	atomic.StoreInt32(&sio.boardReady, 0)
-	go sio.handshake(namedLogger)
+	go sio.handshake(namedLogger, id)
 
-	// read lines or await a stop
-	go func() {
-		connReader := bufio.NewReader(sio.conn)
-		lineChannel := sio.readLine(namedLogger, connReader)
+	// read lines until the connection dies
+	go sio.readLoop(namedLogger, id, conn, done)
 
-		for {
-			select {
-			case <-sio.stopChannel:
-				sio.close(namedLogger)
-			case line := <-lineChannel:
-				sio.handleLine(namedLogger, line)
-			}
-		}
-	}()
+	// keep checking that the board is still alive, and reconnect if it isn't
+	go sio.heartbeatLoop(namedLogger, id, done)
+	go sio.watchdogLoop(namedLogger, id, done)
 
 	return nil
+}
+
+// isCurrent returns whether id belongs to the connection that's open right now
+func (sio *SerialIO) isCurrent(id uint64) bool {
+	sio.stateMu.Lock()
+	defer sio.stateMu.Unlock()
+
+	return sio.conn != nil && sio.connID == id
+}
+
+// teardown closes the connection identified by id. Returns false if that
+// connection was already gone (or replaced by a newer one), so only one
+// caller ever gets to handle a given connection's death
+func (sio *SerialIO) teardown(id uint64) bool {
+	sio.stateMu.Lock()
+
+	if sio.conn == nil || sio.connID != id {
+		sio.stateMu.Unlock()
+		return false
+	}
+
+	conn := sio.conn
+	done := sio.connDone
+
+	sio.conn = nil
+	sio.connDone = nil
+
+	atomic.StoreInt32(&sio.connected, 0)
+	atomic.StoreInt32(&sio.boardReady, 0)
+
+	sio.stateMu.Unlock()
+
+	// wake up everything that waits on this connection
+	close(done)
+
+	// deliberately not holding writeMutex here: a write stuck on a dead port
+	// must not be able to block the close that would free it
+	if err := conn.Close(); err != nil {
+		sio.logger.Warnw("Failed to close serial connection", "error", err)
+	} else {
+		sio.logger.Debug("Serial connection closed")
+	}
+
+	return true
+}
+
+// connectionLost is called by any goroutine that finds the connection broken or
+// unresponsive. It closes the connection and starts reconnecting (unless deej is
+// shutting the connection down on purpose)
+func (sio *SerialIO) connectionLost(id uint64, reason string) {
+	if !sio.teardown(id) {
+		return
+	}
+
+	sio.logger.Warnw("Serial connection lost, will try to reconnect", "reason", reason)
+
+	sio.stateMu.Lock()
+	start := !sio.userStopped && !sio.reconnecting
+	if start {
+		sio.reconnecting = true
+	}
+	sio.stateMu.Unlock()
+
+	if start {
+		go sio.reconnectLoop()
+	}
+}
+
+// reconnectLoop retries opening the port with a growing delay until it works,
+// or until someone stops us / connects on their own
+func (sio *SerialIO) reconnectLoop() {
+	delay := reconnectMinDelay
+
+	for attempt := 1; ; attempt++ {
+		time.Sleep(delay)
+
+		sio.stateMu.Lock()
+
+		if sio.userStopped || sio.conn != nil {
+			sio.reconnecting = false
+			sio.stateMu.Unlock()
+			return
+		}
+
+		err := sio.openLocked()
+		if err == nil {
+			// must be reset while still holding the lock: the new connection's
+			// goroutines may already be trying to report it as lost
+			sio.reconnecting = false
+			sio.stateMu.Unlock()
+
+			sio.logger.Infow("Reconnected to board", "attempts", attempt)
+			return
+		}
+
+		sio.stateMu.Unlock()
+
+		if attempt == 1 || attempt%10 == 0 {
+			sio.logger.Warnw("Reconnect attempt failed", "attempt", attempt, "error", err)
+		}
+
+		delay *= 2
+		if delay > reconnectMaxDelay {
+			delay = reconnectMaxDelay
+		}
+	}
 }
 
 // Write sends a raw line to the board. Safe to call from multiple goroutines
@@ -143,11 +313,15 @@ func (sio *SerialIO) Write(data string) error {
 	sio.writeMutex.Lock()
 	defer sio.writeMutex.Unlock()
 
-	if !sio.connected || sio.conn == nil {
+	sio.stateMu.Lock()
+	conn := sio.conn
+	sio.stateMu.Unlock()
+
+	if conn == nil {
 		return errors.New("serial: not connected")
 	}
 
-	if _, err := sio.conn.Write([]byte(data)); err != nil {
+	if _, err := conn.Write([]byte(data)); err != nil {
 		return fmt.Errorf("serial write: %w", err)
 	}
 
@@ -156,7 +330,7 @@ func (sio *SerialIO) Write(data string) error {
 
 // Connected returns whether a serial connection is currently open
 func (sio *SerialIO) Connected() bool {
-	return sio.connected
+	return atomic.LoadInt32(&sio.connected) == 1
 }
 
 // BoardReady returns whether the board has answered our handshake on this connection
@@ -174,14 +348,14 @@ func (sio *SerialIO) OnBoardReady(hook func()) {
 // resets some boards (Uno/Nano) and swallows whatever we send during boot, so
 // a single blind write wouldn't be reliable. Boards that run the vanilla
 // sketch never answer; the pings are harmless and we give up after a while
-func (sio *SerialIO) handshake(logger *zap.SugaredLogger) {
+func (sio *SerialIO) handshake(logger *zap.SugaredLogger, id uint64) {
 	const (
 		attempts = 20
 		interval = 500 * time.Millisecond
 	)
 
 	for i := 0; i < attempts; i++ {
-		if sio.BoardReady() || !sio.connected {
+		if sio.BoardReady() || !sio.isCurrent(id) {
 			return
 		}
 
@@ -193,19 +367,96 @@ func (sio *SerialIO) handshake(logger *zap.SugaredLogger) {
 		time.Sleep(interval)
 	}
 
-	if !sio.BoardReady() {
+	if !sio.BoardReady() && sio.isCurrent(id) {
 		logger.Info("Board didn't answer the handshake - it's probably running a sketch without LED support")
+	}
+}
+
+// heartbeatLoop sends "H" to the board every few seconds; the board answers "HB".
+// Only boards that answered the handshake (i.e. run the LED sketch, which reads
+// serial input) get pings: a board that never reads its input would eventually
+// block our writes once its receive buffer is full
+func (sio *SerialIO) heartbeatLoop(logger *zap.SugaredLogger, id uint64, done chan struct{}) {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	unanswered := 0
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+
+		if !sio.BoardReady() {
+			continue
+		}
+
+		if atomic.LoadInt32(&sio.heartbeatSeen) == 0 {
+			unanswered++
+
+			if unanswered == heartbeatUnsupportedAfter {
+				logger.Info("Board doesn't answer heartbeats - its sketch is probably older. " +
+					"Flash the current sketch to get the full check, until then only incoming data is monitored")
+			}
+		}
+
+		if err := sio.Write("H\n"); err != nil {
+			sio.connectionLost(id, fmt.Sprintf("heartbeat write failed: %v", err))
+			return
+		}
+	}
+}
+
+// watchdogLoop declares the connection dead when the board went quiet or stopped
+// answering heartbeats
+func (sio *SerialIO) watchdogLoop(logger *zap.SugaredLogger, id uint64, done chan struct{}) {
+	ticker := time.NewTicker(watchdogTick)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+
+		now := sio.nowNanos()
+
+		silent := time.Duration(now - atomic.LoadInt64(&sio.lastRx))
+		if silent > silenceTimeout {
+			sio.connectionLost(id, fmt.Sprintf("no data from board for %s", silent.Round(time.Millisecond)))
+			return
+		}
+
+		// once the board has proven that it answers heartbeats, insist on it:
+		// this also catches a board that still streams values but no longer reacts
+		if atomic.LoadInt32(&sio.heartbeatSeen) == 1 {
+			sinceAck := time.Duration(now - atomic.LoadInt64(&sio.lastHeartbeatAck))
+			if sinceAck > heartbeatTimeout {
+				sio.connectionLost(id, fmt.Sprintf("no heartbeat answer for %s", sinceAck.Round(time.Millisecond)))
+				return
+			}
+		}
 	}
 }
 
 // Stop signals us to shut down our serial connection, if one is active
 func (sio *SerialIO) Stop() {
-	if sio.connected {
-		sio.logger.Debug("Shutting down serial connection")
-		sio.stopChannel <- true
-	} else {
+	sio.stateMu.Lock()
+	sio.userStopped = true // also cancels a reconnect loop that's currently running
+	id := sio.connID
+	active := sio.conn != nil
+	sio.stateMu.Unlock()
+
+	if !active {
 		sio.logger.Debug("Not currently connected, nothing to stop")
+		return
 	}
+
+	sio.logger.Debug("Shutting down serial connection")
+	sio.teardown(id)
 }
 
 // SubscribeToSliderMoveEvents returns an unbuffered channel that receives
@@ -254,51 +505,60 @@ func (sio *SerialIO) setupOnConfigReload() {
 	}()
 }
 
-func (sio *SerialIO) close(logger *zap.SugaredLogger) {
-	if err := sio.conn.Close(); err != nil {
-		logger.Warnw("Failed to close serial connection", "error", err)
-	} else {
-		logger.Debug("Serial connection closed")
-	}
+// readLoop reads lines from the board until the connection ends
+func (sio *SerialIO) readLoop(logger *zap.SugaredLogger, id uint64, conn io.Reader, done chan struct{}) {
+	reader := bufio.NewReader(conn)
 
-	sio.writeMutex.Lock()
-	sio.conn = nil
-	sio.connected = false
-	sio.writeMutex.Unlock()
-}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
 
-func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) chan string {
-	ch := make(chan string)
-
-	go func() {
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-
-				if sio.deej.Verbose() {
-					logger.Warnw("Failed to read line from serial", "error", err, "line", line)
-				}
-
-				// just ignore the line, the read loop will stop after this
+			// closed on purpose (Stop, or someone else already handled the loss)
+			select {
+			case <-done:
 				return
+			default:
 			}
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Read new line", "line", line)
+				logger.Warnw("Failed to read line from serial", "error", err, "line", line)
 			}
 
-			// deliver the line to the channel
-			ch <- line
+			sio.connectionLost(id, fmt.Sprintf("read failed: %v", err))
+			return
 		}
-	}()
 
-	return ch
+		atomic.StoreInt64(&sio.lastRx, sio.nowNanos())
+
+		if sio.deej.Verbose() {
+			logger.Debugw("Read new line", "line", line)
+		}
+
+		sio.handleLine(logger, done, line)
+	}
 }
 
-func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
+func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, done chan struct{}, line string) {
+	sio.lineMu.Lock()
+	defer sio.lineMu.Unlock()
 
-	// the board announces itself on boot and answers our pings with READY
-	if strings.TrimSpace(line) == "READY" {
+	// a line that was read just before its connection got torn down is stale
+	select {
+	case <-done:
+		return
+	default:
+	}
+
+	switch strings.TrimSpace(line) {
+
+	// the board answers our heartbeat pings with HB
+	case "HB":
+		atomic.StoreInt64(&sio.lastHeartbeatAck, sio.nowNanos())
+		atomic.StoreInt32(&sio.heartbeatSeen, 1)
+		return
+
+	// the board announces itself on boot and answers our handshake pings with READY
+	case "READY":
 		logger.Info("Board is ready")
 		atomic.StoreInt32(&sio.boardReady, 1)
 
@@ -378,10 +638,16 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 	}
 
 	// deliver move events if there are any, towards all potential consumers
+	// (bail out if the connection is torn down meanwhile, so a slow consumer
+	// can't keep a dead connection's reader stuck)
 	if len(moveEvents) > 0 {
 		for _, consumer := range sio.sliderMoveConsumers {
 			for _, moveEvent := range moveEvents {
-				consumer <- moveEvent
+				select {
+				case consumer <- moveEvent:
+				case <-done:
+					return
+				}
 			}
 		}
 	}
