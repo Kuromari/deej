@@ -19,7 +19,7 @@ func (d *Deej) initializeTray(onDone func()) {
 
 		ledColors := systray.AddMenuItem("LED-Farben…", "LED-Farben und Verläufe pro Slider einstellen")
 
-		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with notepad")
+		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with the default editor")
 		editConfig.SetIcon(icon.EditConfig)
 
 		refreshSessions := systray.AddMenuItem("Re-scan audio sessions", "Manually refresh audio sessions if something's stuck")
@@ -58,13 +58,10 @@ func (d *Deej) initializeTray(onDone func()) {
 				case <-editConfig.ClickedCh:
 					logger.Info("Edit config menu item clicked, opening config for editing")
 
-					editor := "notepad.exe"
-					if util.Linux() {
-						editor = "gedit"
-					}
-
-					if err := util.OpenExternal(logger, editor, userConfigFilepath); err != nil {
+					// open with whatever the system has associated with .yaml files
+					if err := util.OpenFile(logger, userConfigFilepath); err != nil {
 						logger.Warnw("Failed to open config file for editing", "error", err)
+						d.notifier.Notify("Can't open config file", err.Error())
 					}
 
 				// refresh sessions

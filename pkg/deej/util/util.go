@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
@@ -91,6 +92,51 @@ func OpenBrowser(logger *zap.SugaredLogger, url string) error {
 	go command.Wait()
 
 	return nil
+}
+
+// OpenFile opens the given file with the system's default application for its type,
+// without waiting for that application to exit
+func OpenFile(logger *zap.SugaredLogger, path string) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve absolute path of %s: %w", path, err)
+	}
+
+	if _, err := os.Stat(absPath); err != nil {
+		return fmt.Errorf("file not accessible: %w", err)
+	}
+
+	var command *exec.Cmd
+
+	if Linux() {
+
+		// xdg-open is the standard, gio is the fallback for minimal setups
+		switch {
+		case hasCommand("xdg-open"):
+			command = exec.Command("xdg-open", absPath)
+		case hasCommand("gio"):
+			command = exec.Command("gio", "open", absPath)
+		default:
+			return fmt.Errorf("neither xdg-open nor gio found, install xdg-utils to open files from the tray")
+		}
+	} else {
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", absPath)
+	}
+
+	if err := command.Start(); err != nil {
+		logger.Warnw("Failed to open file", "path", absPath, "error", err)
+		return fmt.Errorf("open file: %w", err)
+	}
+
+	// reap the process so it doesn't linger as a zombie
+	go command.Wait()
+
+	return nil
+}
+
+func hasCommand(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // NormalizeScalar "trims" the given float32 to 2 points of precision (e.g. 0.15442 -> 0.15)
