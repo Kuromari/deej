@@ -25,9 +25,10 @@
 // up to the slider position, the color of each LED comes from the slider's
 // color/gradient, and the last lit LED fades in smoothly.
 //
-// Calibration: the sliders' raw readings aren't linear over their whole
-// travel, so calibrate() maps them piecewise onto 0-1023 (see there). Both the
-// LEDs and the values sent to deej (i.e. the volume) use the corrected value.
+// Linearization: the sliders' raw readings aren't linear over their whole
+// travel, so linearize() maps them in three segments (see calStart/calEnd).
+// Both the LEDs and the values sent to deej (i.e. the volume) use the
+// corrected value.
 // To re-measure, set CALIBRATION_MODE to true, flash, close deej and open the
 // Arduino serial monitor (9600 baud): you get the raw values plus a line every
 // second with the min/max seen per slider.
@@ -48,20 +49,27 @@ const uint8_t MAX_STOPS = 4;
 
 const bool CALIBRATION_MODE = false;
 
+// ---- linearization ----
+// {raw value, target value}
+//   raw <= calStart[0]         -> 0 .. calStart[1]
+//   calStart[0] .. calEnd[0]   -> calStart[1] .. calEnd[1]
+//   raw >= calEnd[0]           -> calEnd[1] .. 1024 (raw 1020 = end)
+const int calStart[2] = {20, 180};
+const int calEnd[2]   = {950, 940};
 
 // LEDs only follow the slider if it moved at least this much (of 1023), so
 // analog noise doesn't make the last LED flicker
-const int LED_DEADBAND = 10;
+const int LED_DEADBAND = 1;
 
 // every slider keeps its last SMOOTH_SAMPLES raw readings and reports the
 // highest of them, which suppresses single downward spikes (flicker)
-const uint8_t SMOOTH_SAMPLES = 10;
+const uint8_t SMOOTH_SAMPLES = 15;
 
 // default-constructed and configured in setup(): copying NeoPixel objects
 // (e.g. via an initializer list) would free their pixel buffers twice
 Adafruit_NeoPixel strips[NUM_SLIDERS];
 
-int analogSliderValues[NUM_SLIDERS]; // calibrated, 0-1023
+int analogSliderValues[NUM_SLIDERS]; // linearized, 0-1023
 int ledLevelValues[NUM_SLIDERS];     // value the LEDs currently show (deadbanded)
 int rawHistory[NUM_SLIDERS][SMOOTH_SAMPLES]; // ring buffer of raw readings
 uint8_t historyPos = 0;
@@ -123,23 +131,19 @@ void loop() {
 
 // ---- slider values -> PC -------------------------------------------------
 
-// clamp to the linear range and stretch it to 0-1023
-// piecewise correction of the raw reading (0-1023) to a linear 0-1023:
-//   raw   0..29   ->    0..100   (bottom end)
-//   raw  30..900  ->  101..799   (linear middle)
-//   raw 901..1023 ->  800..1023  (top end)
-int calibrate(int raw) {
+// three-segment correction of the raw reading to a linear 0-1023
+int linearize(int raw) {
   long v;
 
-  if (raw < 30) {
-    v = map(raw, 0, 30, 0, 100);
-  } else if (raw > 900) {
-    v = map(raw, 900, 1023, 800, 1023);
+  if (raw <= calStart[0]) {
+    v = map(raw, 0, calStart[0], 0, calStart[1]);
+  } else if (raw >= calEnd[0]) {
+    v = map(raw, calEnd[0], 1020, calEnd[1], 1024);
   } else {
-    v = map(raw, 31, 899, 101, 799);
+    v = map(raw, calStart[0], calEnd[0], calStart[1], calEnd[1]);
   }
 
-  return (int)constrain(v, 0, 1023);
+  return (int)constrain(v, 0, 1024);
 }
 
 void reportCalibration() {
@@ -169,8 +173,8 @@ void updateSliderValues() {
       if (rawHistory[i][k] > raw) raw = rawHistory[i][k];
     }
 
-    // in calibration mode we pass the (smoothed) raw value through uncalibrated
-    int value = CALIBRATION_MODE ? raw : calibrate(raw);
+    // in calibration mode we pass the (smoothed) raw value through uncorrected
+    int value = CALIBRATION_MODE ? raw : linearize(raw);
     analogSliderValues[i] = value;
 
     // the ends always snap, in between the deadband applies
@@ -318,21 +322,12 @@ void renderDirty() {
 void renderSlider(uint8_t s) {
   uint8_t n = stopCount[s];
 
-  // fill level in 1/256 LED units: 0 = all off, LEDS_PER_SLIDER*256 = all on
-  uint32_t level = (uint32_t)ledLevelValues[s] * LEDS_PER_SLIDER * 256UL / 1023;
+  // wie im alten Script: (int)(LEDS / 1022 * value), also abgerundet
+  uint32_t lit = (uint32_t)ledLevelValues[s] * LEDS_PER_SLIDER / 1022;
+  if (lit > LEDS_PER_SLIDER) lit = LEDS_PER_SLIDER;
 
   for (uint8_t j = 0; j < LEDS_PER_SLIDER; j++) {
-    // how much of this LED is lit: full below the level, partial on the
-    // boundary LED, off above
-    uint32_t ledStart = (uint32_t)j * 256;
-    uint8_t fill;
-    if (level >= ledStart + 256) {
-      fill = 255;
-    } else if (level <= ledStart) {
-      fill = 0;
-    } else {
-      fill = (uint8_t)(level - ledStart);
-    }
+    uint8_t fill = (j < lit) ? 255 : 0;
 
     if (fill == 0) {
       strips[s].setPixelColor(j, 0);
