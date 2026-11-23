@@ -22,8 +22,8 @@
 //     HB                                 answer to 'H'
 //
 // LED behavior: each strip works as a level meter. LEDs light up from LED 0
-// up to the slider position, the color of each LED comes from the slider's
-// color/gradient, and the last lit LED fades in smoothly.
+// up to the slider position (the number of lit LEDs is rounded down), and the
+// color of each LED comes from the slider's color/gradient.
 //
 // Linearization: the sliders' raw readings aren't linear over their whole
 // travel, so linearize() maps them in three segments (see calStart/calEnd).
@@ -53,17 +53,17 @@ const bool CALIBRATION_MODE = false;
 // {raw value, target value}
 //   raw <= calStart[0]         -> 0 .. calStart[1]
 //   calStart[0] .. calEnd[0]   -> calStart[1] .. calEnd[1]
-//   raw >= calEnd[0]           -> calEnd[1] .. 1024 (raw 1020 = end)
+//   raw >= calEnd[0]           -> calEnd[1] .. 1023 (raw 1020 = end)
 const int calStart[2] = {20, 180};
 const int calEnd[2]   = {950, 940};
 
 // LEDs only follow the slider if it moved at least this much (of 1023), so
 // analog noise doesn't make the last LED flicker
-const int LED_DEADBAND = 1;
+const int LED_DEADBAND = 8;
 
 // every slider keeps its last SMOOTH_SAMPLES raw readings and reports the
 // highest of them, which suppresses single downward spikes (flicker)
-const uint8_t SMOOTH_SAMPLES = 15;
+const uint8_t SMOOTH_SAMPLES = 10;
 
 // default-constructed and configured in setup(): copying NeoPixel objects
 // (e.g. via an initializer list) would free their pixel buffers twice
@@ -138,12 +138,13 @@ int linearize(int raw) {
   if (raw <= calStart[0]) {
     v = map(raw, 0, calStart[0], 0, calStart[1]);
   } else if (raw >= calEnd[0]) {
-    v = map(raw, calEnd[0], 1020, calEnd[1], 1024);
+    v = map(raw, calEnd[0], 1020, calEnd[1], 1023);
   } else {
     v = map(raw, calStart[0], calEnd[0], calStart[1], calEnd[1]);
   }
 
-  return (int)constrain(v, 0, 1024);
+  // never above 1023: that's the highest value deej accepts
+  return (int)constrain(v, 0, 1023);
 }
 
 void reportCalibration() {
@@ -322,14 +323,12 @@ void renderDirty() {
 void renderSlider(uint8_t s) {
   uint8_t n = stopCount[s];
 
-  // wie im alten Script: (int)(LEDS / 1022 * value), also abgerundet
+  // number of lit LEDs: (int)(LEDS / 1022 * value), i.e. rounded down
   uint32_t lit = (uint32_t)ledLevelValues[s] * LEDS_PER_SLIDER / 1022;
   if (lit > LEDS_PER_SLIDER) lit = LEDS_PER_SLIDER;
 
   for (uint8_t j = 0; j < LEDS_PER_SLIDER; j++) {
-    uint8_t fill = (j < lit) ? 255 : 0;
-
-    if (fill == 0) {
+    if (j >= lit) {
       strips[s].setPixelColor(j, 0);
       continue;
     }
@@ -359,10 +358,9 @@ void renderSlider(uint8_t s) {
       }
     }
 
-    uint8_t scale = ((uint16_t)brightness * fill) / 255;
-    uint8_t r = ((uint16_t)rgb[0] * scale) / 255;
-    uint8_t g = ((uint16_t)rgb[1] * scale) / 255;
-    uint8_t b = ((uint16_t)rgb[2] * scale) / 255;
+    uint8_t r = ((uint16_t)rgb[0] * brightness) / 255;
+    uint8_t g = ((uint16_t)rgb[1] * brightness) / 255;
+    uint8_t b = ((uint16_t)rgb[2] * brightness) / 255;
 
     strips[s].setPixelColor(j, strips[s].Color(r, g, b));
   }

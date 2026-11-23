@@ -36,6 +36,11 @@ const (
 
 	reconnectMinDelay = 500 * time.Millisecond
 	reconnectMaxDelay = 5 * time.Second
+
+	// highest value a slider can report. the LED sketch may send 1024 at the very end
+	// of the travel (its linearization overshoots by one), which we treat as 1023.
+	// anything above that is line noise
+	maxSliderValue = 1023
 )
 
 // SerialIO provides a deej-aware abstraction layer to managing serial I/O
@@ -476,19 +481,20 @@ func (sio *SerialIO) setupOnConfigReload() {
 	go func() {
 		for range configReloadedChannel {
 			// make any config reload unset our slider number to ensure process volumes are being re-set
-			// (the next read line will emit SliderMoveEvent instances for all sliders)\
+			// (the next read line will emit SliderMoveEvent instances for all sliders)
 			// this needs to happen after a small delay, because the session map will also re-acquire sessions
 			// whenever the config file is reloaded, and we don't want it to receive these move events while the map
 			// is still cleared. this is kind of ugly, but shouldn't cause any issues
 			go func() {
 				<-time.After(stopDelay)
+
+				sio.lineMu.Lock()
 				sio.lastKnownNumSliders = 0
+				sio.lineMu.Unlock()
 			}()
 
 			// if connection params have changed, attempt to stop and start the connection
-			if sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
-				uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate {
-
+			if sio.connectionParamsChanged() {
 				sio.logger.Info("Detected change in connection parameters, attempting to renew connection")
 				sio.Stop()
 
@@ -503,6 +509,23 @@ func (sio *SerialIO) setupOnConfigReload() {
 			}
 		}
 	}()
+}
+
+// connectionParamsChanged returns whether the config's port/baud rate differ from the ones in use
+func (sio *SerialIO) connectionParamsChanged() bool {
+	sio.stateMu.Lock()
+	defer sio.stateMu.Unlock()
+
+	return sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
+		uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate
+}
+
+// NumSliders returns the number of sliders the board reported (0 if unknown yet)
+func (sio *SerialIO) NumSliders() int {
+	sio.lineMu.Lock()
+	defer sio.lineMu.Unlock()
+
+	return sio.lastKnownNumSliders
 }
 
 // readLoop reads lines from the board until the connection ends
@@ -539,8 +562,6 @@ func (sio *SerialIO) readLoop(logger *zap.SugaredLogger, id uint64, conn io.Read
 }
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, done chan struct{}, line string) {
-	sio.lineMu.Lock()
-	defer sio.lineMu.Unlock()
 
 	// a line that was read just before its connection got torn down is stale
 	select {
@@ -569,11 +590,28 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, done chan struct{}, l
 		return
 	}
 
+	// the events are delivered without holding lineMu: a slow consumer must not be able to
+	// block everything that needs the lock (openLocked takes it while holding stateMu)
+	sio.deliverMoveEvents(done, sio.parseSliderLine(logger, done, line))
+}
+
+// parseSliderLine turns one line of slider values into the move events it causes
+func (sio *SerialIO) parseSliderLine(logger *zap.SugaredLogger, done chan struct{}, line string) []SliderMoveEvent {
+	sio.lineMu.Lock()
+	defer sio.lineMu.Unlock()
+
+	// check again now that we hold the lock: the connection may have been replaced meanwhile
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+
 	// this function receives an unsanitized line which is guaranteed to end with LF,
 	// but most lines will end with CRLF. it may also have garbage instead of
 	// deej-formatted values, so we must check for that! just ignore bad ones
 	if !expectedLinePattern.MatchString(line) {
-		return
+		return nil
 	}
 
 	// trim the suffix
@@ -602,15 +640,19 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, done chan struct{}, l
 		// convert string values to integers ("1023" -> 1023)
 		number, _ := strconv.Atoi(stringValue)
 
-		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
-		// so let's check the first number for correctness just in case
-		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
-			return
+		// the first line could come out dirty sometimes (i.e. "4558|925|41|643|220"),
+		// so every value gets checked. 1024 is tolerated (see maxSliderValue), more isn't
+		if number > maxSliderValue+1 {
+			logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			return nil
+		}
+
+		if number > maxSliderValue {
+			number = maxSliderValue
 		}
 
 		// map the value from raw to a "dirty" float between 0 and 1 (e.g. 0.15451...)
-		dirtyFloat := float32(number) / 1023.0
+		dirtyFloat := float32(number) / float32(maxSliderValue)
 
 		// normalize it to an actual volume scalar between 0.0 and 1.0 with 2 points of precision
 		normalizedScalar := util.NormalizeScalar(dirtyFloat)
@@ -637,17 +679,18 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, done chan struct{}, l
 		}
 	}
 
-	// deliver move events if there are any, towards all potential consumers
-	// (bail out if the connection is torn down meanwhile, so a slow consumer
-	// can't keep a dead connection's reader stuck)
-	if len(moveEvents) > 0 {
-		for _, consumer := range sio.sliderMoveConsumers {
-			for _, moveEvent := range moveEvents {
-				select {
-				case consumer <- moveEvent:
-				case <-done:
-					return
-				}
+	return moveEvents
+}
+
+// deliverMoveEvents hands the events to all consumers. It bails out if the connection
+// is torn down meanwhile, so a slow consumer can't keep a dead connection's reader stuck
+func (sio *SerialIO) deliverMoveEvents(done chan struct{}, moveEvents []SliderMoveEvent) {
+	for _, consumer := range sio.sliderMoveConsumers {
+		for _, moveEvent := range moveEvents {
+			select {
+			case consumer <- moveEvent:
+			case <-done:
+				return
 			}
 		}
 	}

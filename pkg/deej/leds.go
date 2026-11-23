@@ -56,6 +56,12 @@ type LEDController struct {
 	sliderCount  func() int
 	sliderLabels func(n int) []string
 
+	// pushMu serializes pushes, so lines reach the board in order. It is held while
+	// writing to the serial port, which is why mu (below) must never be held for that.
+	// lock order: pushMu -> mu
+	pushMu sync.Mutex
+
+	// mu guards settings, sentBrightness and sentLines
 	mu             sync.Mutex
 	settings       LEDSettings
 	sentBrightness int            // -1 = unknown
@@ -106,6 +112,17 @@ func (c *LEDController) Apply(in LEDSettings, save bool) error {
 		return err
 	}
 
+	if err := c.update(clean, save); err != nil {
+		return err
+	}
+
+	c.push(false)
+
+	return nil
+}
+
+// update stores the new settings (and optionally persists them)
+func (c *LEDController) update(clean LEDSettings, save bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -119,11 +136,9 @@ func (c *LEDController) Apply(in LEDSettings, save bool) error {
 	if save {
 		if err := c.saveToDisk(); err != nil {
 			c.logger.Warnw("Failed to save LED settings", "error", err)
-			return fmt.Errorf("Speichern fehlgeschlagen: %v", err)
+			return fmt.Errorf("failed to save LED settings: %w", err)
 		}
 	}
-
-	c.pushLocked(false)
 
 	return nil
 }
@@ -139,48 +154,70 @@ func (c *LEDController) Snapshot(n int) LEDSettings {
 // PushAll re-sends the complete state to the board. Called when the board
 // announces that it's ready (boot, reconnect)
 func (c *LEDController) PushAll() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	c.logger.Debug("Pushing full LED state to board")
-	c.pushLocked(true)
+	c.push(true)
 }
 
-// must be called with c.mu held
-func (c *LEDController) pushLocked(force bool) {
+type pendingLEDLine struct {
+	sliderIdx int
+	line      string
+}
+
+// push sends whatever the board doesn't know yet. The serial writes happen without
+// holding c.mu, so a stuck port can't block Snapshot (and with it the settings page)
+func (c *LEDController) push(force bool) {
+	c.pushMu.Lock()
+	defer c.pushMu.Unlock()
+
 	if !c.transport.Connected() {
 		return
 	}
+
+	// decide what needs sending
+	c.mu.Lock()
 
 	if force {
 		c.sentBrightness = -1
 		c.sentLines = map[int]string{}
 	}
 
-	if c.sentBrightness != c.settings.Brightness {
-		if err := c.transport.Write(fmt.Sprintf("B%d\n", c.settings.Brightness)); err != nil {
+	brightness := c.settings.Brightness
+	sendBrightness := c.sentBrightness != brightness
+
+	// send everything we have, the board ignores slider indexes it doesn't know.
+	// this keeps us independent of whether the slider count has been detected yet
+	var pending []pendingLEDLine
+	for i := range c.settings.Sliders {
+		line := ledLine(i, c.settings.Sliders[i])
+
+		if c.sentLines[i] != line {
+			pending = append(pending, pendingLEDLine{sliderIdx: i, line: line})
+		}
+	}
+
+	c.mu.Unlock()
+
+	// send it, and remember what made it to the board
+	if sendBrightness {
+		if err := c.transport.Write(fmt.Sprintf("B%d\n", brightness)); err != nil {
 			c.logger.Debugw("Failed to send brightness", "error", err)
 			return
 		}
 
-		c.sentBrightness = c.settings.Brightness
+		c.mu.Lock()
+		c.sentBrightness = brightness
+		c.mu.Unlock()
 	}
 
-	// send everything we have, the board ignores slider indexes it doesn't know.
-	// this keeps us independent of whether the slider count has been detected yet
-	for i := range c.settings.Sliders {
-		line := ledLine(i, c.settings.Sliders[i])
-
-		if c.sentLines[i] == line {
-			continue
-		}
-
-		if err := c.transport.Write(line + "\n"); err != nil {
-			c.logger.Debugw("Failed to send LED line", "slider", i, "error", err)
+	for _, p := range pending {
+		if err := c.transport.Write(p.line + "\n"); err != nil {
+			c.logger.Debugw("Failed to send LED line", "slider", p.sliderIdx, "error", err)
 			return
 		}
 
-		c.sentLines[i] = line
+		c.mu.Lock()
+		c.sentLines[p.sliderIdx] = p.line
+		c.mu.Unlock()
 	}
 }
 
@@ -240,11 +277,11 @@ func (c *LEDController) saveToDisk() error {
 
 func sanitizeLEDSettings(in LEDSettings) (LEDSettings, error) {
 	if in.Brightness < 0 || in.Brightness > 255 {
-		return LEDSettings{}, errors.New("Helligkeit muss zwischen 0 und 255 liegen")
+		return LEDSettings{}, errors.New("brightness must be between 0 and 255")
 	}
 
 	if len(in.Sliders) == 0 || len(in.Sliders) > ledMaxSliders {
-		return LEDSettings{}, fmt.Errorf("Anzahl Slider muss zwischen 1 und %d liegen", ledMaxSliders)
+		return LEDSettings{}, fmt.Errorf("number of sliders must be between 1 and %d", ledMaxSliders)
 	}
 
 	out := LEDSettings{
@@ -254,14 +291,14 @@ func sanitizeLEDSettings(in LEDSettings) (LEDSettings, error) {
 
 	for i, slider := range in.Sliders {
 		if len(slider.Stops) < 1 || len(slider.Stops) > ledMaxStops {
-			return LEDSettings{}, fmt.Errorf("Slider %d: 1 bis %d Farben erwartet", i+1, ledMaxStops)
+			return LEDSettings{}, fmt.Errorf("slider %d: expected 1 to %d colors", i+1, ledMaxStops)
 		}
 
 		out.Sliders[i].Stops = make([]string, len(slider.Stops))
 
 		for j, stop := range slider.Stops {
 			if !ledHexColorPattern.MatchString(stop) {
-				return LEDSettings{}, fmt.Errorf("Slider %d: ungültige Farbe %q", i+1, stop)
+				return LEDSettings{}, fmt.Errorf("slider %d: invalid color %q", i+1, stop)
 			}
 
 			out.Sliders[i].Stops[j] = strings.ToLower(stop)

@@ -121,7 +121,7 @@ func (s *ledServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.tokenValid(r.URL.Query().Get("t")) {
-		http.Error(w, "Link ungültig - bitte über das deej-Tray-Menü erneut öffnen.", http.StatusForbidden)
+		http.Error(w, "invalid link - please reopen it from the deej tray menu", http.StatusForbidden)
 		return
 	}
 
@@ -165,7 +165,7 @@ func (s *ledServer) handleSet(w http.ResponseWriter, r *http.Request) {
 
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
 	if err := decoder.Decode(&settings); err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Ungültige Daten"})
+		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid data"})
 		return
 	}
 

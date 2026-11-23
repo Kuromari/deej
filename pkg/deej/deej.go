@@ -123,7 +123,7 @@ func (d *Deej) Initialize() error {
 // ledSliderCount returns how many sliders the LED code should care about:
 // whatever the board reports, falling back to the highest mapped slider
 func (d *Deej) ledSliderCount() int {
-	n := d.serial.lastKnownNumSliders
+	n := d.serial.NumSliders()
 
 	if n <= 0 && d.config.SliderMapping != nil {
 		d.config.SliderMapping.iterate(func(idx int, _ []string) {

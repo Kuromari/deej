@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>deej – LED-Farben</title>
+<title>deej – LED colors</title>
 <style>
   :root {
     --bg: #f4f5f7; --card: #ffffff; --text: #1c1d21; --muted: #6b7078;
@@ -54,12 +54,12 @@
 <body>
 <main>
   <header>
-    <h1>deej – LED-Farben</h1>
+    <h1>deej – LED colors</h1>
     <span id="conn" class="pill">…</span>
   </header>
 
   <div class="card">
-    <div class="row"><span class="title grow">Helligkeit</span><span id="brightLabel" class="sub"></span></div>
+    <div class="row"><span class="title grow">Brightness</span><span id="brightLabel" class="sub"></span></div>
     <input id="brightness" type="range" min="0" max="100" step="1">
   </div>
 
@@ -74,13 +74,13 @@
   var TOKEN = "__DEEJ_TOKEN__";
   var MAX_STOPS = 4;
   var PRESETS = {
-    "Sonnenuntergang": ["#ff5f6d", "#ffc371"],
-    "Ozean":           ["#00c6ff", "#0072ff"],
-    "Feuer":           ["#ff0000", "#ff8800", "#ffee00"],
-    "Wald":            ["#134e5e", "#71b280"],
+    "Sunset": ["#ff5f6d", "#ffc371"],
+    "Ocean":           ["#00c6ff", "#0072ff"],
+    "Fire":           ["#ff0000", "#ff8800", "#ffee00"],
+    "Forest":            ["#134e5e", "#71b280"],
     "Neon":            ["#ff00cc", "#3333ff"],
-    "Regenbogen":      ["#ff0000", "#ffee00", "#00ff66", "#0066ff"],
-    "Weiß":            ["#ffffff"]
+    "Rainbow":      ["#ff0000", "#ffee00", "#00ff66", "#0066ff"],
+    "White":            ["#ffffff"]
   };
 
   var state = null;          // last state from the server
@@ -112,7 +112,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.settings)
     }).then(function () {
-      if (save) { setStatus("Gespeichert ✓"); }
+      if (save) { setStatus("Saved ✓"); }
     }).catch(function (err) { setStatus(err.message, true); });
   }
 
@@ -159,7 +159,7 @@
 
     var stopsRow = el("div", { class: "row" });
     slider.stops.forEach(function (color, k) {
-      var picker = el("input", { type: "color", value: color, title: "Farbe " + (k + 1) });
+      var picker = el("input", { type: "color", value: color, title: "Color " + (k + 1) });
       picker.addEventListener("input", function () {
         slider.stops[k] = picker.value;
         paintBar();
@@ -169,7 +169,7 @@
       var stop = el("span", { class: "stop" }, [picker]);
       if (slider.stops.length > 1) {
         stop.appendChild(el("button", {
-          class: "x", title: "Farbe entfernen", text: "✕",
+          class: "x", title: "Remove color", text: "✕",
           onclick: function () { slider.stops.splice(k, 1); changed(); rebuild(); }
         }));
       }
@@ -180,19 +180,19 @@
 
     if (slider.stops.length < MAX_STOPS) {
       tools.appendChild(el("button", {
-        class: "icon", title: "Farbe hinzufügen (Verlauf)", text: "＋",
+        class: "icon", title: "Add color (gradient)", text: "＋",
         onclick: function () { slider.stops.push(slider.stops[slider.stops.length - 1]); changed(); rebuild(); }
       }));
     }
 
     if (slider.stops.length > 1) {
       tools.appendChild(el("button", {
-        class: "icon", title: "Richtung umkehren", text: "⇄",
+        class: "icon", title: "Reverse direction", text: "⇄",
         onclick: function () { slider.stops.reverse(); changed(); rebuild(); }
       }));
     }
 
-    var presetSelect = el("select", { title: "Vorlage" }, [el("option", { value: "", text: "Vorlage…" })]);
+    var presetSelect = el("select", { title: "Preset" }, [el("option", { value: "", text: "Preset…" })]);
     Object.keys(PRESETS).forEach(function (name) {
       presetSelect.appendChild(el("option", { value: name, text: name }));
     });
@@ -205,8 +205,8 @@
     tools.appendChild(presetSelect);
 
     tools.appendChild(el("button", {
-      text: "Auf alle",
-      title: "Diese Farben für alle Slider übernehmen",
+      text: "Apply to all",
+      title: "Use these colors for all sliders",
       onclick: function () {
         state.settings.sliders.forEach(function (s) { s.stops = slider.stops.slice(); });
         changed();
@@ -237,11 +237,11 @@
   function renderConnection() {
     var pill = document.getElementById("conn");
     if (!state.connected) {
-      pill.textContent = "Board nicht verbunden"; pill.className = "pill bad";
+      pill.textContent = "Board not connected"; pill.className = "pill bad";
     } else if (!state.boardReady) {
-      pill.textContent = "Board antwortet nicht (Sketch ohne LED-Support?)"; pill.className = "pill warn";
+      pill.textContent = "Board not responding (sketch without LED support?)"; pill.className = "pill warn";
     } else {
-      pill.textContent = "Board verbunden"; pill.className = "pill ok";
+      pill.textContent = "Board connected"; pill.className = "pill ok";
     }
   }
 
@@ -269,7 +269,7 @@
       state.boardReady = s.boardReady;
       renderConnection();
     }).catch(function () {
-      document.getElementById("conn").textContent = "deej nicht erreichbar";
+      document.getElementById("conn").textContent = "deej unreachable";
       document.getElementById("conn").className = "pill bad";
     });
   }
@@ -282,7 +282,7 @@
     // only poll the status afterwards, so we never overwrite what's being edited
     setInterval(refreshConnectionOnly, 3000);
   }).catch(function (err) {
-    setStatus("Konnte Einstellungen nicht laden: " + err.message, true);
+    setStatus("Could not load settings: " + err.message, true);
   });
 })();
 </script>
