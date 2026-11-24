@@ -2,6 +2,7 @@ package deej
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -277,7 +278,7 @@ func (m *sessionMap) applyCurrentSliderValues() {
 			resolvedTargets := m.resolveTarget(target)
 
 			for _, resolvedTarget := range resolvedTargets {
-				sessions, ok := m.get(resolvedTarget)
+				sessions, ok := m.getMatching(resolvedTarget)
 				if !ok {
 					continue
 				}
@@ -333,7 +334,7 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 			// safe to assume this has a single element because we made sure there's no special transform
 			target = m.resolveTarget(target)[0]
 
-			if target == session.Key() {
+			if targetMatchesKey(target, session.Key()) { // vorher: target == session.Key()
 				matchFound = true
 				return
 			}
@@ -373,7 +374,7 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 		for _, resolvedTarget := range resolvedTargets {
 
 			// check the map for matching sessions
-			sessions, ok := m.get(resolvedTarget)
+			sessions, ok := m.getMatching(resolvedTarget)
 
 			// no sessions matching this target - move on
 			if !ok {
@@ -510,4 +511,50 @@ func (m *sessionMap) String() string {
 	}
 
 	return fmt.Sprintf("<%d audio sessions>", sessionCount)
+}
+
+// returns true if the target contains glob characters (*, ?, [...])
+func isWildcardTarget(target string) bool {
+	return strings.ContainsAny(target, "*?[")
+}
+
+// matches a (lowercased) config target against a (lowercased) session key,
+// supporting glob patterns like "valorant*"
+func targetMatchesKey(target, key string) bool {
+	if target == key {
+		return true
+	}
+
+	if !isWildcardTarget(target) {
+		return false
+	}
+
+	matched, err := path.Match(target, strings.ToLower(key))
+	return err == nil && matched
+}
+
+// like get(), but also supports glob patterns
+func (m *sessionMap) getMatching(target string) ([]Session, bool) {
+
+	// exact match first: cheap, and keeps keys that happen to contain
+	// glob characters (e.g. a weird exe name) working as before
+	if sessions, ok := m.get(target); ok {
+		return sessions, true
+	}
+
+	if !isWildcardTarget(target) {
+		return nil, false
+	}
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+
+	var result []Session
+	for key, sessions := range m.m {
+		if targetMatchesKey(target, key) {
+			result = append(result, sessions...)
+		}
+	}
+
+	return result, len(result) > 0
 }
