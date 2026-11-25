@@ -6,65 +6,113 @@
 <title>deej – LED colors</title>
 <style>
   :root {
-    --bg: #f4f5f7; --card: #ffffff; --text: #1c1d21; --muted: #6b7078;
-    --border: #dcdfe4; --accent: #3b82f6; --ok: #22a559; --warn: #d98b00; --bad: #d64545;
-    color-scheme: light;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #17181b; --card: #212328; --text: #eceef1; --muted: #9aa0a9;
-      --border: #34373e; --accent: #5b9bff; --ok: #3ecf7a; --warn: #f0b13a; --bad: #ff6b6b;
-      color-scheme: dark;
-    }
+    --text: #e8eaee; --muted: #9ba3b0; --card: #2b2e35; --border: #474c57;
+    --accent: #6aa5ff; --ok: #3ecf5a; --warn: #f0b13a; --bad: #ff6b5b;
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 20px 14px 40px; background: var(--bg); color: var(--text);
-         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 520px; margin: 0 auto; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-  h1 { font-size: 18px; margin: 0; }
-  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
-          color: var(--muted); white-space: nowrap; }
-  .pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-                  margin-right: 6px; background: var(--muted); }
-  .pill.ok::before { background: var(--ok); } .pill.warn::before { background: var(--warn); }
-  .pill.bad::before { background: var(--bad); }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-          padding: 12px 14px; margin-bottom: 10px; }
+  html { min-height: 100%; background: linear-gradient(#0a1a38 0%, #14396b 48%, #1d4a24 49%, #123517 100%) fixed; }
+  body { margin: 0; padding: 22px 18px 64px; color: var(--text);
+         font: 12px/1.45 Tahoma, "Segoe UI", Verdana, sans-serif; }
+  main { max-width: none; margin: 0 auto; }
+  .layout { display: grid; grid-template-columns: minmax(320px, 520px) minmax(0, 1fr); gap: 28px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  /* windows: blue for LEDs, olive green for the configuration */
+  .win { --frame: #0a3a9e; --t1: #3b78e7; --t2: #0b3fae; --t3: #082c86; --body: #1e2330; --btn: #5b8df0; --btn2: #2e5fd0;
+         padding: 0 3px 3px; background: var(--frame); border-radius: 9px 9px 3px 3px; box-shadow: 0 8px 22px rgba(0,0,0,.55); }
+  .win.cfg { --frame: #4a5d23; --t1: #8aa653; --t2: #5f7a2b; --t3: #46591f; --body: #23271f; --btn: #a3bd6c; --btn2: #6a8830; }
+  .titlebar { display: flex; align-items: center; gap: 8px; margin: 0 -3px; padding: 4px 6px 4px 10px; min-height: 30px;
+              border-radius: 9px 9px 0 0; color: #fff; font-weight: bold; font-size: 13px; text-shadow: 1px 1px 1px rgba(0,0,0,.65);
+              background: linear-gradient(var(--t1), var(--t2) 14%, var(--t2) 70%, var(--t3)); }
+  .titlebar .ttl { flex: 1; }
+  .btns { display: flex; gap: 2px; }
+  .btns i { width: 21px; height: 21px; display: grid; place-items: center; font-style: normal; font-size: 11px;
+            border: 1px solid #fff; border-radius: 3px; background: linear-gradient(var(--btn), var(--btn2)); }
+  .btns i.cl { background: linear-gradient(#ea8a6c, #c2431f); }
+  .winbody { background: var(--body); padding: 10px; border: 1px solid rgba(0,0,0,.55); }
+
+  /* group boxes */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 10px 12px; margin-bottom: 10px;
+          box-shadow: inset 1px 1px 0 rgba(255,255,255,.06); }
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .title { font-weight: 600; }
-  .sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title { font-weight: bold; color: #8fb8ff; }
+  .win.cfg .title { color: #bfd88a; }
+  .sub { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .grow { flex: 1; min-width: 0; }
-  .bar { height: 16px; border-radius: 8px; margin: 10px 0; border: 1px solid var(--border); }
-  input[type=color] { width: 38px; height: 30px; padding: 0; border: 1px solid var(--border);
-                      border-radius: 8px; background: none; cursor: pointer; }
-  input[type=range] { width: 100%; accent-color: var(--accent); }
-  button, select { font: inherit; color: var(--text); background: var(--card); border: 1px solid var(--border);
-                   border-radius: 8px; padding: 4px 10px; cursor: pointer; }
-  button:hover, select:hover { border-color: var(--accent); }
-  button.icon { padding: 4px 8px; }
+  .bar { height: 16px; border-radius: 3px; margin: 10px 0; border: 2px solid #12141a; box-shadow: 0 0 0 1px var(--border); }
+
+  /* controls */
+  input[type=color] { width: 38px; height: 28px; padding: 0; border: 1px solid #0c0d10; border-radius: 3px; background: none; cursor: pointer; }
+  input[type=range] { width: 100%; accent-color: #3a8bff; }
+  button, select { font: inherit; color: var(--text); cursor: pointer; padding: 3px 10px;
+                   background: linear-gradient(#4d525c, #353840); border: 1px solid #0c0d10; border-radius: 3px;
+                   box-shadow: inset 0 1px 0 rgba(255,255,255,.2); }
+  button:hover, select:hover { box-shadow: inset 0 0 0 1px #f5c264; }
+  button:active { background: linear-gradient(#2c2f36, #3a3e47); }
+  button.icon { padding: 3px 8px; }
   .stop { display: inline-flex; align-items: center; gap: 2px; }
-  .stop .x { border: none; background: none; color: var(--muted); padding: 0 4px; }
-  .stop .x:hover { color: var(--bad); }
+  .stop .x, .chip .x { border: none; background: none; box-shadow: none; color: var(--muted); padding: 0 4px; }
+  .stop .x:hover, .chip .x:hover { color: var(--bad); box-shadow: none; }
   .tools { margin-top: 2px; }
-  #status { margin-top: 14px; min-height: 18px; color: var(--muted); font-size: 12px; text-align: center; }
-  #status.err { color: var(--bad); }
+  .txt { width: 100%; margin-top: 6px; font: inherit; color: var(--text); background: #14161a; padding: 4px 8px;
+         border: 1px solid #0c0d10; border-radius: 3px; box-shadow: inset 1px 1px 3px rgba(0,0,0,.7); }
+
+  /* configuration window */
+  .side { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; align-items: start; }
+  .side .card { margin-bottom: 0; max-height: 420px; overflow: auto; }
+  .item { padding: 5px 0; border-top: 1px solid var(--border); margin-top: 5px; }
+  .name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name.special { color: var(--accent); } .name.device { color: var(--muted); }
+  .tag { font-size: 11px; padding: 1px 7px; border-radius: 3px; background: #2f66d6; color: #fff; }
+  .tag.on { background: #2e8b3a; }
+  .chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 3px; background: #1d2026;
+          padding: 1px 4px 1px 8px; font-size: 11px; }
+
+  .sub.grp { margin-top: 10px; font-weight: bold; color: var(--accent); }
+  .win.cfg .sub.grp { color: #bfd88a; }
+
+  /* taskbar: start button, status, connection in the tray */
+  .taskbar { position: fixed; left: 0; right: 0; bottom: 0; height: 34px; display: flex; align-items: center; gap: 14px; color: #fff;
+             background: linear-gradient(#3168d5, #4993e6 3%, #2157d7 8%, #245bdb 50%, #2663e0 90%, #1941a5);
+             box-shadow: 0 -1px 0 #0b2f86; text-shadow: 1px 1px 1px rgba(0,0,0,.5); }
+  .start { align-self: stretch; display: flex; align-items: center; padding: 0 24px 0 14px; border-radius: 0 14px 14px 0;
+           font: italic bold 17px "Trebuchet MS", Tahoma, sans-serif; box-shadow: 2px 0 4px rgba(0,0,0,.45);
+           background: linear-gradient(#63c163, #3a9a3a 15%, #2e8a2e 80%, #267026); }
+  #status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.err { color: #ffd6cf; font-weight: bold; }
+  .pill { font-size: 11px; white-space: nowrap; }
+  .pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; background: #9ba3b0; box-shadow: 0 0 0 1px rgba(0,0,0,.5); }
+  .pill.ok::before { background: #5dff7a; } .pill.warn::before { background: #ffd24a; } .pill.bad::before { background: #ff6b5b; }
+  .taskbar .pill { align-self: stretch; display: flex; align-items: center; padding: 0 16px; border-left: 1px solid #0b2f86;
+                   background: linear-gradient(#0f8ee8, #1a9cf0 12%, #0b78d6 90%); }
 </style>
 </head>
 <body>
 <main>
-  <header>
-    <h1>deej – LED colors</h1>
-    <span id="conn" class="pill">…</span>
-  </header>
+  <div class="layout">
+    <section class="win leds">
+      <div class="titlebar"><span class="ttl">LED colors</span><span class="btns" aria-hidden="true"><i>_</i><i>▫</i><i class="cl">✕</i></span></div>
+      <div class="winbody">
+        <div class="card">
+          <div class="row"><span class="title grow">Brightness</span><span id="brightLabel" class="sub"></span></div>
+          <input id="brightness" type="range" min="0" max="100" step="1">
+        </div>
+        <div id="sliders"></div>
+      </div>
+    </section>
 
-  <div class="card">
-    <div class="row"><span class="title grow">Brightness</span><span id="brightLabel" class="sub"></span></div>
-    <input id="brightness" type="range" min="0" max="100" step="1">
+    <section class="win cfg">
+      <div class="titlebar"><span class="ttl">Audio &amp; devices</span><span class="btns" aria-hidden="true"><i>_</i><i>▫</i><i class="cl">✕</i></span></div>
+      <div class="winbody"><aside class="side" id="editor"></aside></div>
+    </section>
   </div>
 
-  <div id="sliders"></div>
-  <div id="status"></div>
+  <div class="taskbar">
+    <span class="start">deej</span>
+    <span id="status"></span>
+    <span id="conn" class="pill">…</span>
+  </div>
 </main>
 
 <script>
@@ -261,6 +309,148 @@
     changed();
   });
 
+  // ---- editor: sessions, slider assignment, COM ports --------------------
+
+  var mapping = [], sessions = [], ports = [], mapSaveTimer = null, lastSig = "";
+  var editor = document.getElementById("editor");
+
+  // same idea as path.Match on the Go side (only * and ? are shown as wildcards here)
+  function globMatch(pattern, key) {
+    var re = new RegExp("^" + pattern.toLowerCase().replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*").replace(/\?/g, ".") + "$");
+    return re.test(key.toLowerCase());
+  }
+
+  function slidersFor(key) {
+    var out = [];
+    mapping.forEach(function (targets, i) {
+      if (targets.some(function (t) { return globMatch(t, key); })) { out.push(i); }
+    });
+    return out;
+  }
+
+  function saveMapping() {
+    clearTimeout(mapSaveTimer);
+    mapSaveTimer = setTimeout(function () {
+      api("/api/mapping", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sliders: mapping })
+      }).then(function () { setStatus("Assignment saved ✓"); })
+        .catch(function (err) { setStatus(err.message, true); });
+    }, 400);
+  }
+
+  function assign(i, target) {
+    target = target.trim();
+    if (!target || mapping[i].some(function (t) { return t.toLowerCase() === target.toLowerCase(); })) { return; }
+    mapping[i].push(target);
+    saveMapping();
+    renderEditor();
+  }
+
+  function unassign(i, target) {
+    mapping[i] = mapping[i].filter(function (t) { return t !== target; });
+    saveMapping();
+    renderEditor();
+  }
+
+  function section(title, tools) {
+    var c = el("div", { class: "card" });
+    c.appendChild(el("div", { class: "row" }, [el("span", { class: "title grow", text: title })].concat(tools || [])));
+    editor.appendChild(c);
+    return c;
+  }
+
+  function renderEditor() {
+    var n = state.numSliders;
+    editor.textContent = "";
+
+    var box = section("Audio sessions", [el("button", {
+      class: "icon", title: "Rescan sessions", text: "⟳", onclick: function () { pollEditor(true); }
+    })]);
+    var all = sessions.concat([{ key: "deej.current", kind: "special" }, { key: "deej.unmapped", kind: "special" }]);
+    [["Programs", "app"], ["deej functions", "special"], ["Devices", "device"]].forEach(function (g) {
+    var items = all.filter(function (x) { return x.kind === g[1]; });
+    if (!items.length) { return; }
+    box.appendChild(el("div", { class: "sub grp", text: g[0] }));
+    items.forEach(function (x) {
+      var tags = slidersFor(x.key).map(function (i) { return el("span", { class: "tag", text: "S" + (i + 1) }); });
+      var pick = el("select", { title: "Assign to slider" }, [el("option", { value: "", text: "Assign…" })]);
+      for (var i = 0; i < n; i++) { pick.appendChild(el("option", { value: String(i), text: "Slider " + (i + 1) })); }
+      pick.addEventListener("change", function () { if (pick.value !== "") { assign(Number(pick.value), x.key); } });
+      box.appendChild(el("div", { class: "row item" },
+        [el("span", { class: "grow name " + x.kind, title: x.key, text: x.key })].concat(tags, [pick])));
+    });
+    });
+
+    var assigned = section("Slider assignment");
+    mapping.forEach(function (targets, i) {
+      var input = el("input", { type: "text", class: "txt", placeholder: "name or pattern, e.g. valorant*" });
+      input.addEventListener("keydown", function (e) { if (e.key === "Enter") { assign(i, input.value); } });
+      var chips = targets.map(function (t) {
+        return el("span", { class: "chip" }, [el("span", { text: t }),
+          el("button", { class: "x", title: "Remove", text: "✕", onclick: function () { unassign(i, t); } })]);
+      });
+      assigned.appendChild(el("div", { class: "item" },
+        [el("div", { class: "row" }, [el("b", { text: "Slider " + (i + 1) })].concat(chips)), input]));
+    });
+
+    var com = section("COM ports");
+    if (!ports.length) { com.appendChild(el("div", { class: "sub", text: "No COM ports found." })); }
+    ports.forEach(function (p) {
+      var row = [el("div", { class: "grow" }, [el("div", { class: "name", text: p.name }), el("div", { class: "sub", text: p.desc || "" })])];
+      if (p.active) { row.push(el("span", { class: "tag on", text: "selected" })); }
+      else { row.push(el("button", { title: "Use this port", text: "Use", onclick: function () { selectPort(p.name); } })); }
+      com.appendChild(el("div", { class: "row item" }, row));
+    });
+  }
+
+  var selectedPort = null; // keeps the choice visible until the reloaded config reports it
+
+  function selectPort(name) {
+    api("/api/port", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: name })
+    }).then(function () {
+      selectedPort = name;
+      ports.forEach(function (p) { p.active = p.name === name; });
+      setStatus("COM port saved ✓ deej reconnects");
+      renderEditor();
+    }).catch(function (err) { setStatus(err.message, true); });
+  }
+
+  function pollEditor(rescan) {
+    return Promise.all([api("/api/sessions" + (rescan === true ? "?refresh=1" : "")), api("/api/ports")]).then(function (r) {
+      var sig = JSON.stringify(r);
+      sessions = r[0]; ports = r[1];
+      if (selectedPort) {
+        if (ports.some(function (p) { return p.active && p.name === selectedPort; })) { selectedPort = null; }
+        else { ports.forEach(function (p) { p.active = p.name === selectedPort; }); }
+      }
+      // don't rebuild while the user is typing or has a dropdown open
+      if (sig !== lastSig && (rescan === true || !editor.contains(document.activeElement))) {
+        lastSig = sig;
+        renderEditor();
+      }
+    }).catch(function (err) {
+      if (!lastSig) {
+        editor.textContent = "";
+        section("Editor").appendChild(el("div", { class: "sub", text: "Not available: " + err.message }));
+      }
+    });
+  }
+
+  function initEditor() {
+    api("/api/mapping").then(function (m) {
+      mapping = m.sliders || [];
+      while (mapping.length < state.numSliders) { mapping.push([]); }
+      return pollEditor();
+    }).then(function () { setInterval(pollEditor, 5000); })
+      .catch(function (err) { setStatus("Editor: " + err.message, true); });
+  }
+
   // ---- init --------------------------------------------------------------
 
   function refreshConnectionOnly() {
@@ -281,6 +471,7 @@
     render();
     // only poll the status afterwards, so we never overwrite what's being edited
     setInterval(refreshConnectionOnly, 3000);
+    initEditor();
   }).catch(function (err) {
     setStatus("Could not load settings: " + err.message, true);
   });

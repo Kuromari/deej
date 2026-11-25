@@ -66,6 +66,7 @@ func NewDeej(logger *zap.SugaredLogger, verbose bool) (*Deej, error) {
 	d.serial = serial
 
 	d.leds = NewLEDController(logger, serial, d.ledSliderCount, d.ledSliderLabels)
+	d.leds.AttachDeej(d)
 	serial.OnBoardReady(d.leds.PushAll)
 
 	sessionFinder, err := newSessionFinder(logger)

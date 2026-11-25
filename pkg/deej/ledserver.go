@@ -31,6 +31,8 @@ const (
 // request needs a random per-run token. The API wants it in a custom header,
 // which cross-origin pages can't send without a CORS preflight we never answer
 type ledServer struct {
+	deej *Deej // set right after creation; enables the sessions/ports/mapping editor
+
 	logger *zap.SugaredLogger
 	ctl    *LEDController
 
@@ -91,6 +93,7 @@ func (s *ledServer) handler() http.Handler {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/leds", s.handleSet)
+	s.registerEditorRoutes(mux)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostAllowed(r.Host) {

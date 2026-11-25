@@ -17,7 +17,7 @@ func (d *Deej) initializeTray(onDone func()) {
 		systray.SetTitle("deej")
 		systray.SetTooltip("deej")
 
-		ledColors := systray.AddMenuItem("LED colors…", "Set LED colors and gradients per slider")
+		ledColors := systray.AddMenuItem("Interface", "Interface to change LED Colors or edit the config")
 
 		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with the default editor")
 		editConfig.SetIcon(icon.EditConfig)
