@@ -204,10 +204,17 @@ func (d *Deej) run() {
 				d.logger.Warnw("Provided COM port seems wrong, notifying user and closing",
 					"comPort", d.config.ConnectionInfo.COMPort)
 
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
+				// instead of quitting, let the user pick a port in the settings page.
+				// saving the port rewrites config.yaml, and the reload makes deej reconnect
+				if d.openCOMPortPicker() {
+					d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
+						"This serial port doesn't exist. Please choose the right COM port in the settings page that just opened.")
+				} else {
+					d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
+						"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
 
-				d.signalStop()
+					d.signalStop()
+				}
 			}
 		}
 	}()
