@@ -113,6 +113,16 @@ func (s *ledServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 // stable, hardware-based symlinks provided by udev (survive replugging / reboots, unlike ttyUSB0 and friends)
 const serialByIDDir = "/dev/serial/by-id"
 
+// fixed path of the virtual port created by the board simulator (VirtBoard.py)
+const virtualPortAlias = "/tmp/deej-sim"
+
+// isCharDevice reports whether path (following symlinks) is a character device, which is what
+// serial ports and PTYs are
+func isCharDevice(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
 type ledPortInfo struct {
 	Name   string `json:"name"`
 	Desc   string `json:"desc"`
@@ -180,6 +190,35 @@ func (s *ledServer) listPorts() ([]ledPortInfo, error) {
 		}
 
 		out = append(out, ledPortInfo{Name: name, Desc: desc, Active: active})
+	}
+
+	// PTYs and other virtual ports are invisible to the enumerator, so add the simulator's alias
+	// and the currently configured port (if it exists but wasn't detected)
+	if runtime.GOOS != "windows" {
+		seen := map[string]bool{}
+		for _, p := range out {
+			seen[p.Name] = true
+			seen[resolvePath(p.Name)] = true
+		}
+
+		configuredReal := resolvePath(configured)
+
+		extras := []ledPortInfo{{Name: virtualPortAlias, Desc: "Virtual port (VirtBoard simulator)"}}
+		if configured != "" {
+			extras = append(extras, ledPortInfo{Name: configured, Desc: "Configured port (not detected as hardware)"})
+		}
+
+		for _, e := range extras {
+			real := resolvePath(e.Name)
+
+			if seen[e.Name] || seen[real] || !isCharDevice(e.Name) {
+				continue
+			}
+
+			seen[e.Name], seen[real] = true, true
+			e.Active = real == configuredReal
+			out = append(out, e)
+		}
 	}
 
 	return out, nil
