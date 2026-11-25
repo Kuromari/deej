@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,24 +110,53 @@ func (s *ledServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, out)
 }
 
+// stable, hardware-based symlinks provided by udev (survive replugging / reboots, unlike ttyUSB0 and friends)
+const serialByIDDir = "/dev/serial/by-id"
+
 type ledPortInfo struct {
 	Name   string `json:"name"`
 	Desc   string `json:"desc"`
 	Active bool   `json:"active"`
 }
 
-func (s *ledServer) handlePorts(w http.ResponseWriter, r *http.Request) {
-	if !s.authorizeAPI(w, r, http.MethodGet) || !s.editorReady(w) {
-		return
+// resolvePath follows symlinks, falling back to the input if that fails
+func resolvePath(p string) string {
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
 	}
 
+	return p
+}
+
+// listPorts returns the available serial ports. On Linux, ports that have a
+// /dev/serial/by-id entry are reported under that stable path instead of /dev/ttyUSBx
+func (s *ledServer) listPorts() ([]ledPortInfo, error) {
 	ports, err := enumerator.GetDetailedPortsList()
 	if err != nil {
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list COM ports"})
-		return
+		return nil, err
 	}
 
-	configured := strings.ToLower(s.deej.config.ConnectionInfo.COMPort)
+	configured := s.deej.config.ConnectionInfo.COMPort
+	isLinux := runtime.GOOS == "linux"
+
+	// real device path -> by-id symlink
+	byID := map[string]string{}
+	configuredReal := ""
+
+	if isLinux {
+		if entries, err := os.ReadDir(serialByIDDir); err == nil {
+			for _, e := range entries {
+				link := filepath.Join(serialByIDDir, e.Name())
+
+				if real, err := filepath.EvalSymlinks(link); err == nil {
+					byID[real] = link
+				}
+			}
+		}
+
+		configuredReal = resolvePath(configured)
+	}
+
 	out := []ledPortInfo{}
 
 	for _, p := range ports {
@@ -133,11 +165,35 @@ func (s *ledServer) handlePorts(w http.ResponseWriter, r *http.Request) {
 			desc = strings.TrimSpace(fmt.Sprintf("%s (USB %s:%s)", p.Product, p.VID, p.PID))
 		}
 
-		out = append(out, ledPortInfo{
-			Name:   p.Name,
-			Desc:   desc,
-			Active: strings.ToLower(p.Name) == configured,
-		})
+		name := p.Name
+		active := strings.EqualFold(p.Name, configured)
+
+		if isLinux {
+			real := resolvePath(p.Name)
+
+			if link, ok := byID[real]; ok {
+				name = link
+			}
+
+			// matches whether config.yaml holds /dev/ttyUSB0 or the by-id path
+			active = real == configuredReal
+		}
+
+		out = append(out, ledPortInfo{Name: name, Desc: desc, Active: active})
+	}
+
+	return out, nil
+}
+
+func (s *ledServer) handlePorts(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAPI(w, r, http.MethodGet) || !s.editorReady(w) {
+		return
+	}
+
+	out, err := s.listPorts()
+	if err != nil {
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list COM ports"})
+		return
 	}
 
 	s.writeJSON(w, http.StatusOK, out)
@@ -262,8 +318,8 @@ func (s *ledServer) handlePort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// only accept ports that actually exist right now
-	ports, err := enumerator.GetDetailedPortsList()
+	// only accept ports that actually exist right now (exactly as listed by listPorts)
+	ports, err := s.listPorts()
 	if err != nil {
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not list COM ports"})
 		return
