@@ -19,6 +19,9 @@ import (
 //go:embed ui/leds.html
 var ledUIHTML string
 
+//go:embed assets/logo.ico
+var ledFavicon []byte
+
 const (
 	ledTokenPlaceholder = "__DEEJ_TOKEN__"
 	ledTokenHeader      = "X-Deej-Token"
@@ -92,6 +95,7 @@ func (s *ledServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/assets/logo.ico", s.handleFavicon)
 	mux.HandleFunc("/api/leds", s.handleSet)
 	s.registerEditorRoutes(mux)
 
@@ -107,6 +111,17 @@ func (s *ledServer) handler() http.Handler {
 
 		mux.ServeHTTP(w, r)
 	})
+}
+
+func (s *ledServer) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Cache-Control", "max-age=86400") // overrides the global no-store
+	_, _ = w.Write(ledFavicon)
 }
 
 func (s *ledServer) hostAllowed(host string) bool {
@@ -130,7 +145,7 @@ func (s *ledServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+		"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'")
 
 	fmt.Fprint(w, strings.Replace(ledUIHTML, ledTokenPlaceholder, s.token, 1))
 }

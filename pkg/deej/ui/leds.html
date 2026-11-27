@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>deej – LED colors</title>
+<link rel="icon" type="image/x-icon" href="/assets/logo.ico">
 <style>
   :root {
     --text: #e8eaee; --muted: #9ba3b0; --card: #2b2e35; --border: #474c57;
@@ -86,6 +87,21 @@
   .pill.ok::before { background: #5dff7a; } .pill.warn::before { background: #ffd24a; } .pill.bad::before { background: #ff6b5b; }
   .taskbar .pill { align-self: stretch; display: flex; align-items: center; padding: 0 16px; border-left: 1px solid #0b2f86;
                    background: linear-gradient(#0f8ee8, #1a9cf0 12%, #0b78d6 90%); }
+
+  /* easter egg: click the start button */
+  .start { cursor: pointer; user-select: none; }
+  .start:hover { filter: brightness(1.12); }
+  .start:active { filter: brightness(.9); }
+  @keyframes egghue { to { filter: hue-rotate(360deg); } }
+  body.rainbow .bar, body.rainbow .start { animation: egghue .9s linear infinite; }
+  .egg { position: fixed; inset: 0; display: none; place-items: center; z-index: 50; background: rgba(0,0,0,.35); }
+  .egg.open { display: grid; }
+  .egg .win { width: min(360px, 90vw); --body: #ece9d8; }
+  .egg .winbody { color: #111; text-align: left; padding: 16px 16px 12px; }
+  .egg .msg { display: flex; gap: 14px; align-items: center; }
+  .egg .ico { font-size: 34px; line-height: 1; }
+  .egg .okrow { text-align: center; margin-top: 16px; }
+  .egg button { color: #111; min-width: 80px; background: linear-gradient(#fff, #ecebe5 85%, #d6d0c5); border: 1px solid #003c74; }
 </style>
 </head>
 <body>
@@ -114,6 +130,17 @@
     <span id="conn" class="pill">…</span>
   </div>
 </main>
+
+<div class="egg" id="egg" role="dialog" aria-modal="true" aria-label="deej">
+  <div class="win">
+    <div class="titlebar"><span class="ttl">deej</span><span class="btns"><i class="cl" id="eggx">✕</i></span></div>
+    <div class="winbody">
+      <div class="msg"><span class="ico">🎚️</span>
+        <span id="eggmsg"></span></div>
+      <div class="okrow"><button id="eggok" type="button">OK</button></div>
+    </div>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -475,6 +502,39 @@
   }).catch(function (err) {
     setStatus("Could not load settings: " + err.message, true);
   });
+
+  // easter egg
+  (function () {
+    var egg = document.getElementById("egg");
+    var msg = document.getElementById("eggmsg");
+    var lines = [
+      "deej has encountered a problem and needs to close.\n\n…just kidding. All sliders are fine. 🎉",
+      "Slider calibration complete.\n\nYour volume is now 11 / 10.",
+      "Fatal error: too much bass.\n\nPlease turn it up anyway.",
+      "Did you know? The loudest app is always Discord."
+    ];
+    var n = 0, timer = null;
+
+    function open() {
+      msg.textContent = lines[n++ % lines.length];
+      msg.style.whiteSpace = "pre-line";
+      egg.classList.add("open");
+      document.body.classList.add("rainbow");
+      clearTimeout(timer);
+      timer = setTimeout(function () { document.body.classList.remove("rainbow"); }, 5000);
+      document.getElementById("eggok").focus();
+    }
+    function close() {
+      egg.classList.remove("open");
+      document.body.classList.remove("rainbow");
+    }
+
+    document.querySelector(".start").addEventListener("click", open);
+    document.getElementById("eggok").addEventListener("click", close);
+    document.getElementById("eggx").addEventListener("click", close);
+    egg.addEventListener("click", function (e) { if (e.target === egg) close(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+  })();
 })();
 </script>
 </body>
