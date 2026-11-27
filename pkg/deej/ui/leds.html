@@ -65,6 +65,7 @@
   .item { padding: 5px 0; border-top: 1px solid var(--border); margin-top: 5px; }
   .name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .name.special { color: var(--accent); } .name.device { color: var(--muted); }
+  .name.stale { opacity: .55; font-style: italic; }
   .tag { font-size: 11px; padding: 1px 7px; border-radius: 3px; background: #2f66d6; color: #fff; }
   .tag.on { background: #2e8b3a; }
   .chip { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 3px; background: #1d2026;
@@ -339,6 +340,8 @@
   // ---- editor: sessions, slider assignment, COM ports --------------------
 
   var mapping = [], sessions = [], ports = [], mapSaveTimer = null, lastSig = "";
+  // sessions that only exist while their window is focused: keep them listed for a while after they vanish
+  var RESCAN_MS = 10000, KEEP_MS = 60000, seen = {};
   var editor = document.getElementById("editor");
 
   // same idea as path.Match on the Go side (only * and ? are shown as wildcards here)
@@ -407,7 +410,8 @@
       for (var i = 0; i < n; i++) { pick.appendChild(el("option", { value: String(i), text: "Slider " + (i + 1) })); }
       pick.addEventListener("change", function () { if (pick.value !== "") { assign(Number(pick.value), x.key); } });
       box.appendChild(el("div", { class: "row item" },
-        [el("span", { class: "grow name " + x.kind, title: x.key, text: x.key })].concat(tags, [pick])));
+        [el("span", { class: "grow name " + x.kind + (x.stale ? " stale" : ""),
+          title: x.key + (x.stale ? " (not active right now)" : ""), text: x.key })].concat(tags, [pick])));
     });
     });
 
@@ -448,10 +452,26 @@
     }).catch(function (err) { setStatus(err.message, true); });
   }
 
+  // rescan === true: user pressed the rescan button (always redraws); otherwise it's a background poll.
+  // every poll asks deej to rescan its audio sessions
   function pollEditor(rescan) {
-    return Promise.all([api("/api/sessions" + (rescan === true ? "?refresh=1" : "")), api("/api/ports")]).then(function (r) {
-      var sig = JSON.stringify(r);
-      sessions = r[0]; ports = r[1];
+    return Promise.all([api("/api/sessions?refresh=1"), api("/api/ports")]).then(function (r) {
+      var now = Date.now(), live = {};
+
+      r[0].forEach(function (x) {
+        live[x.key] = true;
+        seen[x.key] = { key: x.key, kind: x.kind, last: now };
+      });
+
+      // merge: currently active sessions plus recently seen ones (marked stale)
+      sessions = [];
+      Object.keys(seen).sort().forEach(function (k) {
+        if (now - seen[k].last > KEEP_MS) { delete seen[k]; return; }
+        sessions.push({ key: k, kind: seen[k].kind, stale: !live[k] });
+      });
+
+      ports = r[1];
+      var sig = JSON.stringify([sessions, ports]);
       if (selectedPort) {
         if (ports.some(function (p) { return p.active && p.name === selectedPort; })) { selectedPort = null; }
         else { ports.forEach(function (p) { p.active = p.name === selectedPort; }); }
@@ -474,7 +494,7 @@
       mapping = m.sliders || [];
       while (mapping.length < state.numSliders) { mapping.push([]); }
       return pollEditor();
-    }).then(function () { setInterval(pollEditor, 5000); })
+    }).then(function () { setInterval(function () { pollEditor(); }, RESCAN_MS); })
       .catch(function (err) { setStatus("Editor: " + err.message, true); });
   }
 
