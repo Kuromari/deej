@@ -89,6 +89,10 @@ char rxBuf[64];
 uint8_t rxLen = 0;
 bool rxOverflow = false;
 
+double lastHeartBeat = 0;
+double colorTimeout = 5000;
+bool timeoutState = false;
+
 void setup() {
   for (int i = 0; i < NUM_SLIDERS; i++) {
     pinMode(analogInputs[i], INPUT);
@@ -111,6 +115,7 @@ void setup() {
     strips[i].show();
   }
 
+  lastHeartBeat = millis();
   Serial.begin(9600);
   Serial.println("READY");
 }
@@ -124,6 +129,16 @@ void loop() {
 
   if (CALIBRATION_MODE) {
     reportCalibration();
+  }
+
+  if (!timeoutState && millis() - lastHeartBeat > colorTimeout) {
+    for(int i = 0; i < NUM_SLIDERS; i++) {
+      String temp = String("L") + i + ":000000"; 
+      handleCommand(temp.c_str());
+    }
+    markAllDirty();
+
+    timeoutState = true;
   }
 
   delay(10);
@@ -229,6 +244,7 @@ void readCommands() {
 }
 
 void handleCommand(const char *line) {
+  lastHeartBeat = millis();
   switch (line[0]) {
     case '?':
       Serial.println("READY");
@@ -318,6 +334,9 @@ void renderDirty() {
       sliderDirty[s] = false;
     }
   }
+
+  timeoutState = false;
+
 }
 
 void renderSlider(uint8_t s) {
